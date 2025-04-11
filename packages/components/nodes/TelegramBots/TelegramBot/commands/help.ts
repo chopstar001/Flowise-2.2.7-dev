@@ -6,6 +6,7 @@ import { logInfo, logError, logWarn } from '../loggingUtility';
 import { handlePlatformSpecificResponse } from '../utils/utils';
 import { sendConfirmationMessage } from '../utils/confirmationUtil';
 import { ExtendedIMessage, Command } from './types';
+import { MessageType } from '../../../../src/Interface'; // Correct import path for MessageType
 
 export const helpCommand: Command = {
     name: 'help',
@@ -104,28 +105,19 @@ ${knowledgeBaseOverview}`;
                     // Store in memory if available
                     if (memory) {
                         try {
-                            await memory.addChatMessagesExtended([
+                            // Convert messages to the expected format { text: string; type: MessageType }
+                            const messagesToAdd: { text: string; type: MessageType }[] = [
                                 {
-                                    message: '/help',
                                     text: '/help',
-                                    type: 'userMessage',
-                                    metadata: {
-                                        userId,
-                                        sessionId,
-                                        timestamp: Date.now()
-                                    }
-                                } as ExtendedIMessage,
+                                    type: 'userMessage' as MessageType
+                                },
                                 {
-                                    message: helpMessage,
                                     text: helpMessage,
-                                    type: 'apiMessage',
-                                    metadata: {
-                                        userId,
-                                        sessionId,
-                                        timestamp: Date.now()
-                                    }
-                                } as ExtendedIMessage
-                            ], userId, sessionId);
+                                    type: 'apiMessage' as MessageType
+                                }
+                            ];
+                            // Call addChatMessages with correct arguments
+                            await memory.addChatMessages(messagesToAdd, sessionId, userId);
                         } catch (error) {
                             console.error(`[${methodName}] Error storing in memory:`, error);
                             // Continue execution even if memory storage fails

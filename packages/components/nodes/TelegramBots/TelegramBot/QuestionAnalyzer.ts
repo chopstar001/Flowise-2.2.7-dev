@@ -5,6 +5,7 @@ import { invokeModelWithFallback } from './utils/modelUtility';
 import { MessageContext, GroupMemberInfo } from './commands/types';
 import { logInfo, logDebug, logError, logWarn } from './loggingUtility';
 import { ConversationManager } from './ConversationManager';
+import { encoding_for_model, get_encoding, TiktokenModel } from '@dqbd/tiktoken';
 
 export interface QuestionAnalysisResult {
     isQuestion: boolean;
@@ -79,6 +80,7 @@ export class QuestionAnalyzer {
     private readonly MAX_GROUP_QUESTIONS = 10;
     private readonly SUMMARY_THRESHOLD = 50; // Messages before offering summary
     private readonly SUMMARY_EXPIRY = 60 * 60 * 1000; // 1 hour
+    private readonly MAX_SUMMARY_INPUT_TOKENS = 4000; // Max tokens for summary input history
 
 
     constructor(
@@ -991,15 +993,58 @@ export class QuestionAnalyzer {
              Keep your summary under 200 words and organize it by topic where possible.`
             );
 
-            // Convert messages to a readable format
-            const formattedMessages = messages.map(msg => {
+            // Initialize tokenizer (assuming gpt-3.5-turbo compatibility for token counting)
+            // TODO: Consider making the model configurable or detecting from summationModel if possible
+            let tokenizer;
+            try {
+                tokenizer = encoding_for_model('gpt-3.5-turbo' as TiktokenModel);
+            } catch (e) {
+                logWarn(methodName, 'Tiktoken model gpt-3.5-turbo not found, falling back to cl100k_base encoding');
+                tokenizer = get_encoding('cl100k_base');
+            }
+
+            const systemPromptTokens = tokenizer.encode(systemPrompt.content as string).length;
+            const maxHistoryTokens = this.MAX_SUMMARY_INPUT_TOKENS - systemPromptTokens - 100; // Leave buffer for prompt structure and response
+
+            let includedMessages: string[] = [];
+            let currentTokens = 0;
+            let messagesIncludedCount = 0;
+
+            // Iterate messages from newest to oldest
+            for (let i = messages.length - 1; i >= 0; i--) {
+                const msg = messages[i];
                 const role = msg.getType() === 'human' ? 'User' : 'Bot';
                 const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
-                return `${role}: ${content}`;
-            }).join('\n\n');
+                const formattedMsg = `${role}: ${content}`;
+                const msgTokens = tokenizer.encode(formattedMsg).length;
+
+                if (currentTokens + msgTokens <= maxHistoryTokens) {
+                    includedMessages.unshift(formattedMsg); // Add to the beginning to maintain order
+                    currentTokens += msgTokens;
+                    messagesIncludedCount++;
+                } else {
+                    logInfo(methodName, `Token limit reached for summary. Truncating history.`, {
+                        maxHistoryTokens,
+                        currentTokens,
+                        messagesIncluded: messagesIncludedCount,
+                        messagesExcluded: messages.length - messagesIncludedCount
+                    });
+                    break; // Stop adding messages
+                }
+            }
+
+            // Free the tokenizer memory
+            tokenizer.free();
+
+            const formattedMessages = includedMessages.join('\n\n');
+
+            if (messagesIncludedCount === 0) {
+                logWarn(methodName, 'No messages fit within the token limit for summary generation.');
+                return null; // Cannot generate summary if no messages fit
+            }
 
             const userPrompt = new HumanMessage(
-                `Here's a conversation to summarize:\n\n${formattedMessages}`
+                `Here's a conversation to summarize (potentially truncated due to length):\n\n${formattedMessages}`
             );
 
             const response = await invokeModelWithFallback(

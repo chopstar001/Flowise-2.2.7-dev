@@ -106,7 +106,7 @@ export class FileManager {
     // Similarly for PDF
     public async saveAndSendAsPDF(
         adapter: ContextAdapter,
-        content: string,
+        content: string | { type: 'structured_content', sections: Array<{ type: string, content: string, level?: number }> },
         filename: string,
         title?: string,
         options: { includeTOC?: boolean } = {}
@@ -412,16 +412,15 @@ export class FileManager {
         }
     }
 
-    private createPDF(content: string, filePath: string, title: string, options: { includeTOC?: boolean } = {}): Promise<void> {
+    private createPDF(content: string | { type: 'structured_content', sections: Array<{ type: string, content: string, level?: number }> }, filePath: string, title: string, options: { includeTOC?: boolean } = {}): Promise<void> {
         return new Promise((resolve, reject) => {
             try {
                 // Get bot name
                 const botName = this.getBotName() || 'Telegram Bot';
-
-                // Setup document with page event handling for footers
+    
+                // Setup document
                 const doc = new PDFDocument({
                     margin: 50,
-                    bufferPages: true,  // Important for page numbering
                     info: {
                         Title: title,
                         Author: botName,
@@ -429,51 +428,71 @@ export class FileManager {
                         CreationDate: new Date()
                     }
                 });
-
+    
                 // Create file write stream
                 const stream = createWriteStream(filePath);
                 stream.on('error', reject);
                 stream.on('finish', () => resolve());
                 doc.pipe(stream);
-
+    
+                // Store information for page numbering
+                const pageInfo = {
+                    count: 0,
+                    handlePageAdded: () => {
+                        pageInfo.count++;
+                    }
+                };
+    
+                // Register event handler for new pages
+                doc.on('pageAdded', pageInfo.handlePageAdded);
+    
                 // Add a simple header/title page
                 this.addSimplePDFHeader(doc, title);
-
-                // Parse content into sections
-                const sections = this.parseContentSections(content);
-
+    
+                // Determine sections based on input type
+                let sections: Array<{ type: string, content: string, level?: number, number?: number }>;
+                if (typeof content === 'string') {
+                    console.log('[createPDF] Content is a string, parsing sections...');
+                    sections = this.parseContentSections(content);
+                } else if (content && content.type === 'structured_content' && Array.isArray(content.sections)) {
+                    console.log('[createPDF] Content is structured, using provided sections...');
+                    sections = content.sections.map((s) => ({ ...s }));
+                } else {
+                    return reject(new Error('Invalid content type provided to createPDF'));
+                }
+    
                 // Only add TOC if requested and document has enough sections
                 if (options.includeTOC && sections.filter(s => s.type === 'heading' || s.type === 'subheading').length > 3) {
                     this.addSimpleTableOfContents(doc, sections);
                 }
-
+    
                 // Process and add formatted content
                 this.addSimpleFormattedContent(doc, sections);
-
-                // Add page numbers at the bottom of each page
-                const range = doc.bufferedPageRange();
-                for (let i = 0; i < range.count; i++) {
+    
+                // Remove event handler to avoid triggering during page numbering
+                doc.removeListener('pageAdded', pageInfo.handlePageAdded);
+    
+                // Prepare for page numbering
+                const totalPages = pageInfo.count + 1; // Add 1 for the page we're currently on
+    
+                // Add page numbers to each page
+                for (let i = 0; i < totalPages; i++) {
                     doc.switchToPage(i);
-
-                    // Save current y position
-                    const currentY = doc.y;
-
-                    // Go to bottom of page
-                    const bottomY = doc.page.height - 50;
-
-                    // Add page number
+                    
+                    // Define footer position and text
+                    const pageNumberText = `Page ${i + 1} of ${totalPages}`;
+                    const footerY = doc.page.height - 50;
+                    const footerX = doc.page.margins.left;
+                    const footerWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+                    
+                    // Add the page number
                     doc.fontSize(10)
-                        .text(
-                            `Page ${i + 1} of ${range.count}`,
-                            doc.page.margins.left,
-                            bottomY,
-                            { align: 'center', width: doc.page.width - (doc.page.margins.left + doc.page.margins.right) }
-                        );
-
-                    // Restore position
-                    doc.y = currentY;
+                       .text(pageNumberText, footerX, footerY, {
+                           width: footerWidth,
+                           align: 'center'
+                       });
                 }
-
+    
                 // Finalize PDF
                 doc.end();
             } catch (error) {
@@ -637,22 +656,33 @@ export class FileManager {
      * @param outputPath The local path to save the file to
      * @returns Promise that resolves when the download is complete
      */
-    public async downloadFile(url: string, outputPath: string): Promise<void> {
-        console.log(`Downloading file from ${url} to ${outputPath}`);
+    public async downloadFile(url: string, outputPath: string): Promise<string> { // Return the path on success
+        // Extract file extension from URL
+        let extension = '';
+        try {
+            const parsedUrl = new URL(url);
+            extension = path.extname(parsedUrl.pathname); // Get extension like '.mp4'
+        } catch (e) {
+            console.warn(`Could not parse URL to get extension: ${url}`, e);
+        }
 
-        return new Promise<void>((resolve, reject) => {
+        // Append extension to the output path if it exists
+        const finalPath = outputPath + extension;
+        console.log(`Downloading file from ${url} to ${finalPath}`); // Log the final path
+
+        return new Promise<string>((resolve, reject) => { // Update Promise type argument
             // Make sure the directory exists
-            const outputDir = path.dirname(outputPath);
+            const outputDir = path.dirname(finalPath); // Use finalPath's directory
             if (!fs.existsSync(outputDir)) {
                 fs.mkdirSync(outputDir, { recursive: true });
             }
 
-            // Create write stream
-            const fileStream = fs.createWriteStream(outputPath);
+            // Create write stream using the final path with extension
+            const fileStream = fs.createWriteStream(finalPath);
 
             // Handle errors on the write stream
             fileStream.on('error', (error) => {
-                console.error(`Error writing to file ${outputPath}:`, error);
+                console.error(`Error writing to file ${finalPath}:`, error); // Use finalPath
                 reject(error);
             });
 
@@ -665,7 +695,7 @@ export class FileManager {
                 if (response.statusCode !== 200) {
                     const error = new Error(`Failed to download file, status code: ${response.statusCode}`);
                     fileStream.close();
-                    fs.unlink(outputPath, () => { }); // Delete the file
+                    fs.unlink(finalPath, () => { }); // Delete the file using finalPath
                     return reject(error);
                 }
 
@@ -675,8 +705,8 @@ export class FileManager {
                 // When download is complete
                 fileStream.on('finish', () => {
                     fileStream.close();
-                    console.log(`Successfully downloaded file to ${outputPath}`);
-                    resolve();
+                    console.log(`Successfully downloaded file to ${finalPath}`); // Use finalPath
+                    resolve(finalPath); // Resolve with the final path including extension
                 });
             });
 
@@ -684,7 +714,7 @@ export class FileManager {
             request.on('error', (error) => {
                 console.error(`Error downloading file from ${url}:`, error);
                 fileStream.close();
-                fs.unlink(outputPath, () => { }); // Delete the file
+                fs.unlink(finalPath, () => { }); // Delete the file using finalPath
                 reject(error);
             });
 
@@ -692,7 +722,7 @@ export class FileManager {
             request.setTimeout(60000, () => {
                 request.abort();
                 fileStream.close();
-                fs.unlink(outputPath, () => { }); // Delete the file
+                fs.unlink(finalPath, () => { }); // Delete the file using finalPath
                 reject(new Error('Download request timed out'));
             });
         });

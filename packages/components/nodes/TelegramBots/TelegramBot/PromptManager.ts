@@ -180,6 +180,9 @@ export class PromptManager {
             if (contextRequirement === 'rag') {
                 logInfo(methodName, `Using RAG System Prompt`);
                 prompt = this.ragSystemPrompt;
+                if (this.enablePersona) {
+                    prompt += `\n\nAdditional persona characteristics: ${this.personaPrompt}`;
+                }
             } else {
                 prompt = this.generalSystemPrompt;
 
@@ -196,14 +199,15 @@ Context requirement: ${contextRequirement}`;
     }
 
     public constructUserPrompt(question: string, context: string, interactionType: InteractionType): string {
+        // Structure: Context first, then the question.
+        // Instructions are handled by the system prompt.
+        // 'question' is the standaloneQuestion in the RAG context.
         return `
 Question: ${question}
-Interaction Type: ${interactionType}
 
 Retrieved Context:
 ${context || 'No specific context provided.'}
-
-${this.humanMessageTemplate}`;
+`; // Removed Interaction Type and humanMessageTemplate
     }
     // not being used?
     public getSystemPromptForContextRequirement(contextRequirement: ContextRequirement): string {

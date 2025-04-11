@@ -215,21 +215,6 @@ export interface IMessage {
     additional_kwargs?: { message_id?: number };
 }
 
-export interface IExtendedMemory extends FlowiseMemory {
-    getStorageKey(userId: string, sessionId: string): string;
-    initSession?: (userId: string, sessionId: string, metadata?: any) => Promise<void>;
-    hasSession?: (userId: string, sessionId: string) => Promise<boolean>;
-    getChatMessagesExtended(
-        userId: string,
-        sessionId: string,
-        returnBaseMessages?: boolean,
-        prependMessages?: ExtendedIMessage[]
-    ): Promise<BaseMessage[] | ExtendedIMessage[]>;
-    addChatMessagesExtended(msgArray: ExtendedIMessage[], userId: string, sessionId: string): Promise<void>;
-    clearChatMessagesExtended(userId: string, sessionId: string): Promise<void>;
-    clearAllChatMessages(): Promise<void>;  // Make sure this is here
-    getMemoryType(): string;
-}
 export interface UserQuestionData {
     questions: string[];
     currentPage: number;
@@ -248,7 +233,7 @@ export interface UserCitationData {
     messageId: number;
     chatId: number; // Add this if it wasn't there before
 }
-export type MemoryType = FlowiseMemory | IExtendedMemory;
+
 
 export type GroupMemberInfo = {
     is_bot: boolean;
@@ -993,12 +978,118 @@ export type TranscriptionProvider = 'local-cuda' | 'local-cpu' | 'assemblyai' | 
 export interface TranscriptionOptions {
   provider?: TranscriptionProvider;
   modelSize?: 'tiny' | 'base' | 'small' | 'medium' | 'large';
-  language?: string;
+  language?: string; // e.g., 'en', 'es', 'auto'
   apiKey?: string;
+  outputDirectory?: string; // Optional: Specify where local transcript files (.txt) should be saved
 }
 
 export interface TranscriptionEstimate {
     videoId: string;
     estimatedMinutes: number;
     timestamp: number;
+}
+
+/**
+ * Zep-specific types for memory integration
+ */
+export interface ZepFact {
+    content: string;
+    created_at: string;
+    fact: string;
+    uuid: string;
+    expired_at?: string;
+    invalid_at?: string;
+    name?: string;
+    rating?: number;
+    source_node_name?: string;
+    target_node_name?: string;
+    valid_at?: string;
+  }
+  
+  export interface ZepMessage {
+    content: string;
+    role_type: string;
+    role: string;
+    created_at: string;
+    updated_at: string;
+    token_count: number;
+    uuid: string;
+    metadata?: Record<string, any>;
+  }
+  
+  export interface ZepSummary {
+    content: string;
+    created_at: string;
+    token_count: number;
+    uuid: string;
+    related_message_uuids: string[];
+    metadata?: Record<string, any>;
+  }
+  
+  export interface ZepMemoryResponse {
+    context: string;
+    facts: string[];
+    messages: ZepMessage[];
+    metadata: Record<string, any>;
+    relevant_facts: ZepFact[];
+    summary: ZepSummary;
+  }
+  
+  export interface IExtendedMemory extends FlowiseMemory {
+      // Keep all existing methods
+      getStorageKey(userId: string, sessionId: string): string;
+      initSession?: (userId: string, sessionId: string, metadata?: any) => Promise<void>;
+      hasSession?: (userId: string, sessionId: string) => Promise<boolean>;
+      getChatMessagesExtended(
+          userId: string,
+          sessionId: string,
+          returnBaseMessages?: boolean,
+          prependMessages?: ExtendedIMessage[],
+          overrideUserId?: string // Add the missing overrideUserId parameter
+      ): Promise<BaseMessage[] | ExtendedIMessage[]>;
+      // Redefine addChatMessages to accept overrides, matching StandaloneZepMemory implementation
+      addChatMessages(
+          msgArray: { text: string; type: MessageType }[],
+          overrideSessionId?: string,
+          overrideUserId?: string
+      ): Promise<void>;
+      clearChatMessagesExtended(userId: string, sessionId: string): Promise<void>;
+      clearAllChatMessages(): Promise<void>;
+      getMemoryType(): string;
+      
+      // Add new Zep-specific methods as optional
+      getFullZepMemory?: (userId: string, sessionId: string) => Promise<ZepMemoryResponse | null>;
+      getChatFactsExtended?: (userId: string, sessionId: string) => Promise<ZepFact[]>;
+      getSessionSummary?: (userId: string, sessionId: string) => Promise<ZepSummary | null>;
+      searchKnowledgeGraph?: (query: string, userId: string, limit?: number) => Promise<ZepFact[]>;
+  }
+  
+  export type MemoryType = FlowiseMemory | IExtendedMemory;
+  
+  // Add these types to your types.ts file
+export interface ZepNodeResult {
+    created_at: string;
+    name: string;
+    summary: string;
+    uuid: string;
+    attributes?: Record<string, any>;
+    labels?: string[];
+}
+
+export interface ZepEdgeResult {
+    created_at: string;
+    fact: string;
+    name: string;
+    source_node_uuid: string;
+    target_node_uuid: string;
+    uuid: string;
+    episodes?: string[];
+    expired_at?: string;
+    invalid_at?: string;
+    valid_at?: string;
+}
+
+export interface ZepSearchResult {
+    edges: ZepEdgeResult[];
+    nodes: ZepNodeResult[];
 }

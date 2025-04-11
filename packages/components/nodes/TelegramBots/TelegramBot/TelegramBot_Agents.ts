@@ -25,7 +25,7 @@ import { CustomRetriever, DummyRetriever } from './CustomRetriever';
 import { getBaseClasses, getCredentialData, getCredentialParam } from '../../../src/utils';
 import { CommandHandler } from './CommandHandler';
 import { MemoryManager } from './MemoryManager';
-import { MemoryType, BotInfo, IExtendedMemory, ExtendedIMessage, IUpdateMemory, GroupMemberInfo, UserQuestionData, MessageContext, AuthRequest, TelegramAuthData, SessionData, WalletAuthData, UserAccount, UserDataRetriever, UserStats, WebAuthResponse, WebAuthData, SafeOptions, FormattedResponse, SessionInfo, ChatRequest, WebappChatIdData, type ConversationOperation, ConversationMetadata, RateLimits, RawMessageInput, SavedConversation, ConversationMessage } from './commands/types';
+import { MemoryType, BotInfo, IExtendedMemory, ExtendedIMessage, IUpdateMemory, GroupMemberInfo, UserQuestionData, MessageContext, AuthRequest, TelegramAuthData, SessionData, WalletAuthData, UserAccount, UserDataRetriever, UserStats, WebAuthResponse, WebAuthData, SafeOptions, FormattedResponse, SessionInfo, ChatRequest, WebappChatIdData, type ConversationOperation, ConversationMetadata, RateLimits, RawMessageInput, SavedConversation, ConversationMessage, ZepFact, ZepMessage, ZepSummary, ZepMemoryResponse } from './commands/types';
 import { InteractionType, EnhancedResponse, SourceCitation, UserCitationData, PatternContextData, ScoredDocument, LifelineType, GameState, PatternData, ContextRequirement } from './commands/types';
 import { messageContentToString } from './utils/utils';
 import { addImagesToMessages, llmSupportsVision } from '../../../src/multiModalUtils';
@@ -213,6 +213,14 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
 
     public getAgentManager(): AgentManager | null {
         return this.agentManager || null;
+    }
+
+    // Add public getter for TranscriptionService
+    public getTranscriptionService(): TranscriptionService | null {
+        // --> ADD LOGGING <--
+        console.log(`[getTranscriptionService] Returning this.transcriptionService:`, !!this.transcriptionService);
+        // --> END LOGGING <--
+        return this.transcriptionService;
     }
 
     constructor(flowId?: string) {
@@ -953,7 +961,27 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
 
             // await this.checkRetrieverConfiguration();
 
-            // Initialize CommandHandler
+            // Initialize TranscriptionService EARLIER
+            console.log(`Initializing TranscriptionService`);
+            try {
+                this.transcriptionService = new TranscriptionService({
+                    defaultProvider: 'local-cuda', // Use your RTX 3090 by default
+                    whisperPath: '/usr/bin/whisper', // Use the correct path we found
+                    apiKeys: {
+                        'assemblyai': process.env.ASSEMBLYAI_API_KEY || '',
+                        'google': process.env.GOOGLE_API_KEY || ''
+                    }
+                });
+                console.log(`TranscriptionService initialized successfully`);
+                // --> ADD LOGGING <--
+                console.log(`[${methodName}] this.transcriptionService assigned:`, !!this.transcriptionService);
+                // --> END LOGGING <--
+            } catch (error) {
+                console.error(`Error initializing TranscriptionService:`, error);
+                throw error; // Re-throw to prevent the tool from initializing with a broken transcription service
+            }
+
+            // Initialize CommandHandler AFTER TranscriptionService
             if (this.bot && this.conversationManager) {
                 console.log('Bot and ConversationManager initialized. Initializing CommandHandler...');
                 this.commandHandler = new CommandHandler(
@@ -964,10 +992,10 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                     this.agentManager,
                     this.menuManager,
                     this.toolManager,
-                    this.fileManager,
+                    this.fileManager, // FileManager should also be initialized before CommandHandler if needed by commands
                     this.flowId,
                     {
-                        telegramBot: this
+                        telegramBot: this // Pass the current instance which now has transcriptionService
                     }
                 );
                 console.log('CommandHandler created. Registering commands...');
@@ -999,10 +1027,11 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                     console.warn(`[${this.flowId}] YouTube API key not found in environment variables, YouTube functionality will be disabled`);
                 }
                 // When initializing FileManager in TelegramBot_Agents:
+                // Initialize FileManager EARLIER (before CommandHandler)
                 const botName = this.botInfo.length > 0 ? this.botInfo[0].firstName : 'Telegram Bot';
                 this.fileManager = new FileManager(this.botToken, botName);
-                this.setupFileHandlers();
-                console.log('File transcription handlers initialized');
+                // setupFileHandlers call moved later, after CommandHandler is ready
+                console.log('FileManager initialized');
                 // Setup file handlers if FFmpeg is available
                 this.checkTranscriptionRequirements().then(available => {
                     if (available) {
@@ -1077,12 +1106,16 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             if (this.questionAnalyzer && this.conversationManager) {
                 this.questionAnalyzer.setConversationManager(this.conversationManager);
             }
-            // Set component references
+            // Set component references (CommandHandler now exists)
             this.commandHandler.setConversationManager(this.conversationManager);
             this.commandHandler.setMemory(this.memory);
             this.commandHandler.setPromptManager(this.promptManager);
             this.commandHandler.setAgentManager(this.agentManager);
             this.commandHandler.setMenuManager(this.menuManager);
+
+            // Setup file handlers AFTER CommandHandler is initialized
+            this.setupFileHandlers();
+            console.log('File handlers initialized');
 
             this.isInitialized = true;
             options.telegramBotInstance = this;
@@ -1732,39 +1765,17 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         try {
             logInfo(methodName, `Admin ${adminId} attempting to clear all memory`);
 
-            const extendedMemory = this.memory as any;
-            const client = extendedMemory.zepClient;
-
-            if (!client?.memory) {
-                console.error(`[${methodName}] No memory interface in zepClient`);
+            // Use the clearAllChatMessages method if available
+            if (typeof this.memory.clearAllChatMessages === 'function') {
+                console.log(`[${methodName}] Using memory.clearAllChatMessages()`);
+                await this.memory.clearAllChatMessages();
+                console.log(`[${methodName}] Successfully cleared all chat messages`);
             } else {
-                try {
-                    console.log(`[${methodName}] Attempting to list sessions...`);
-                    // Use the correct memory interface
-                    const { sessions } = await client.memory.listSessions({
-                        pageSize: 100,  // Adjust as needed
-                        pageNumber: 1
-                    });
-
-                    console.log(`[${methodName}] Found ${sessions.length} sessions to clear`);
-
-                    // Delete each session using the memory interface
-                    for (const session of sessions) {
-                        try {
-                            await client.memory.delete(session.sessionId);
-                            console.log(`[${methodName}] Deleted session: ${session.sessionId}`);
-                        } catch (error) {
-                            console.warn(`[${methodName}] Error deleting session ${session.sessionId}:`, error);
-                        }
-                    }
-                } catch (error) {
-                    console.error(`[${methodName}] Error listing sessions:`, error);
-                }
+                // Fallback to clear if clearAllChatMessages is not available
+                console.log(`[${methodName}] clearAllChatMessages not available, using clear()`);
+                await this.memory.clear();
+                console.log(`[${methodName}] Cleared using available method`);
             }
-
-            // Clear current session as well
-            await this.memory.clear();
-            console.log(`[${methodName}] Cleared current session`);
 
             logInfo(methodName, `All memory cleared successfully by admin ${adminId}`);
 
@@ -1779,6 +1790,7 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             await adapter.editMessageText(`An error occurred while clearing memory: ${errorMessage}`);
         }
     }
+
     private async handleCancelClearAllMemory(ctx: Context) {
         const adapter = new ContextAdapter(ctx, this.promptManager);
         const methodName = 'handleCancelClearAllMemory';
@@ -1827,45 +1839,83 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             }
         };
 
-        const initializeSession = async (userId: string, sessionId: string) => {
-            const client = await getMemoryClient();
+        // Removed initializeSession helper function as it's no longer needed
 
-            try {
-                if (client.memory?.addSession) {
-                    await client.memory.addSession({
-                        session: {  // Add this wrapper
-                            session_id: sessionId,  // Use session_id instead of sessionId
-                            user_id: userId     // Use user_id instead of userId
-                        },
-                        metadata: {
-                            source: userId.startsWith('flowise_') ? 'flowise' : 'telegram',
-                            created_at: new Date().toISOString()
-                        }
-                    });
-                }
-                console.log(`[${methodName}] Session initialized:`, sessionId);
-                return true;
-            } catch (error) {
-                if (!error.message?.includes('already exists')) {
-                    console.warn(`[${methodName}] Session initialization error:`, error);
-                }
-                return false;
-            }
-        };
+        // Check for Zep capabilities
+        const isZepMemory = externalMemory.getMemoryType?.()?.includes('Zep') ||
+            Object.keys(externalMemory).some(key =>
+                key.toLowerCase().includes('zep') ||
+                (externalMemory[key] && typeof externalMemory[key] === 'object' &&
+                    externalMemory[key].constructor &&
+                    externalMemory[key].constructor.name?.includes('Zep'))
+            );
 
+        console.log(`[${methodName}] Memory has Zep capabilities:`, isZepMemory);
+
+        // Now return the enhanced memory object
         return {
             ...externalMemory,
 
-            getChatMessagesExtended: async (userId: string, sessionId: string, returnBaseMessages?: boolean, prependMessages?: ExtendedIMessage[]) => {
+            getChatMessagesExtended: async (userId: string, sessionId: string, returnBaseMessages?: boolean, prependMessages?: ExtendedIMessage[], overrideUserId = '') => { // Removed skipUserFilter, will use overrideUserId sentinel
                 const client = await getMemoryClient();
-                console.log(`[${methodName}] Getting messages with client type:`, client?.constructor?.name);
-                try {
-                    await initializeSession(userId, sessionId);
-                    const messages = await client.getChatMessages(sessionId, returnBaseMessages, prependMessages);
-                    console.log(`[${methodName}] Retrieved ${messages.length} messages using getChatMessages`);
+                console.log(`[adaptMemory] Getting messages with client type:`, client?.constructor?.name);
 
-                    // Clean the messages based on their type
-                    const cleanedMessages = messages.map((msg: any) => {
+                try {
+                    // Clean the session ID
+                    const cleanedSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+                    // Removed call to initializeSession
+                    const effectiveUserId = overrideUserId || userId; // Use override if provided
+
+                    let messages;
+
+                    // Try different methods to get chat messages
+                    if (typeof client.getMemory === 'function') {
+                        // For local Zep
+                        console.log(`[adaptMemory] Using getMemory method`);
+                        const memory = await client.getMemory(cleanedSessionId);
+                        messages = memory?.messages || [];
+                    } else if (typeof client.getChatMessages === 'function') {
+                        // For cloud Zep / StandaloneZepMemory
+                        console.log(`[adaptMemory] Using getChatMessages method`);
+                        // Pass effectiveUserId as the overrideUserId argument
+                        messages = await client.getChatMessages(cleanedSessionId, returnBaseMessages, prependMessages, effectiveUserId);
+                    } else if (typeof client.memory?.getMessages === 'function') {
+                        // Another possible method
+                        console.log(`[adaptMemory] Using memory.getMessages method`);
+                        const result = await client.memory.getMessages(cleanedSessionId);
+                        messages = result?.messages || [];
+                    } else if (typeof client.memory?.get === 'function') {
+                        // Try memory.get method
+                        console.log(`[adaptMemory] Using memory.get method`);
+                        const memory = await client.memory.get(cleanedSessionId);
+                        messages = memory?.messages || [];
+                    } else {
+                        console.error(`[adaptMemory] No suitable method found to retrieve messages`);
+                        return [];
+                    }
+
+                    console.log(`[adaptMemory] Retrieved ${messages.length} raw messages using available method`);
+
+                    // Filter messages by effectiveUserId if available in metadata
+                    const effectiveUserIdForFilter = overrideUserId || userId; // Ensure we use the correct ID for filtering
+                    const filteredMessages = messages.filter((msg: any) => {
+                        const hasUserIdMetadata = !!msg.metadata?.userId;
+                        const matchesUserId = msg.metadata?.userId === effectiveUserIdForFilter;
+                        const keep = !hasUserIdMetadata || matchesUserId;
+
+                        // Optional: Add debug logging for filtering decision
+                        // if (hasUserIdMetadata) {
+                        //     console.log(`[adaptMemory Filtering] msgUserId=${msg.metadata?.userId}, effectiveUserId=${effectiveUserIdForFilter}, keep=${keep}`);
+                        // }
+
+                        return keep;
+                    });
+                    console.log(`[adaptMemory] Filtered ${messages.length} messages down to ${filteredMessages.length} for userId=${effectiveUserIdForFilter}`);
+
+
+                    // Clean the FILTERED messages based on their type
+                    const cleanedMessages = filteredMessages.map((msg: any) => {
                         if (msg instanceof BaseMessage) {
                             // For BaseMessage instances, create a new instance
                             const cleanedContent = this.cleanMessageContent(
@@ -1892,52 +1942,24 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                         }
                     });
 
+
                     if (returnBaseMessages) {
                         return cleanedMessages;
                     }
 
                     return this.convertToExtendedIMessages(cleanedMessages);
                 } catch (error) {
-                    console.error(`[${methodName}] Error getting messages:`, error);
+                    console.error(`[adaptMemory] Error getting messages:`, error);
                     return [];
                 }
             },
 
-            addChatMessagesExtended: async (msgArray: ExtendedIMessage[], userId: string, sessionId: string) => {
-                if (typeof externalMemory.addChatMessages === 'function') {
-                    // Validate messages before conversion
-                    const validMessages = msgArray.filter(msg =>
-                        msg && msg.message &&
-                        (typeof msg.message === 'string' ? msg.message.trim() !== '' : true)
-                    );
-
-                    if (validMessages.length === 0) {
-                        console.log('No valid messages to add to memory');
-                        return;
-                    }
-
-                    // Add required memory structure while ensuring type compatibility
-                    const formattedMessages: (BaseMessage | ExtendedIMessage)[] = validMessages.map(msg => ({
-                        ...msg,
-                        input: msg.input ?? undefined, // Ensure `input` aligns with the expected type
-                        output: msg.output ?? undefined, // Ensure `output` aligns with the expected type
-                        content: typeof msg.message === 'string' ? msg.message : undefined, // Ensure `content` is a string or undefined
-                    }));
-
-                    return externalMemory.addChatMessages(
-                        this.convertToFlowiseIMessages(formattedMessages),
-                        sessionId
-                    );
-                }
-                throw new Error("addChatMessages not implemented");
-            },
-
-
+            // Removed addChatMessagesExtended definition as it should use the standard addChatMessages
 
             clearChatMessagesExtended: async (userId: string, sessionId: string) => {
                 if (typeof externalMemory.clearChatMessages === 'function') {
                     if (!this.memory) {
-                        console.log`[${methodName}] Bot memory is not initialized. Please try again later.`;
+                        console.log(`[${methodName}] Bot memory is not initialized. Please try again later.`);
                         return;
                     }
                     try {
@@ -1950,32 +1972,36 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                 }
             },
 
-            // Rest of the methods remain the same...
             clearAllChatMessages: async () => {
-                console.log(`[${methodName}] Attempting to clear all chat messages`);
-                if (!this.memory) {
-                    console.log`[${methodName}] Bot memory is not initialized. Please try again later.`;
-                    return;
-                }
+                const clearAllMethodName = 'adaptMemory.clearAllChatMessages';
+                console.log(`[${clearAllMethodName}] Starting to clear all chat sessions`);
+
                 try {
-                    if (typeof this.memory.clearAllChatMessages === 'function') {
-                        await this.memory.clearAllChatMessages();
+                    // Only use externalMemory.clearAllChatMessages if it exists
+                    if (typeof externalMemory.clearAllChatMessages === 'function') {
+                        console.log(`[${clearAllMethodName}] Using externalMemory.clearAllChatMessages()`);
+                        await externalMemory.clearAllChatMessages();
                         return;
                     }
-                    if (typeof this.memory.clear === 'function') {
-                        await this.memory.clear();
-                        return;
-                    }
-                    if (typeof this.memory.clearChatMessages === 'function') {
-                        await this.memory.clearChatMessages();
-                        return;
+
+                    // If no proper method is available, log a warning
+                    console.warn(`[${clearAllMethodName}] externalMemory does not have a clearAllChatMessages method implemented`);
+                    console.warn(`[${clearAllMethodName}] Only the current session's memory will be cleared`);
+
+                    // Fall back to clearing just the current session and log clearly that this is a limited action
+                    if (typeof externalMemory.clearChatMessages === 'function') {
+                        console.log(`[${clearAllMethodName}] Falling back to clearing only current session via clearChatMessages`);
+                        await externalMemory.clearChatMessages();
+                    } else if (typeof externalMemory.clear === 'function') {
+                        console.log(`[${clearAllMethodName}] Falling back to clearing only current session via clear()`);
+                        await externalMemory.clear();
+                    } else {
+                        console.warn(`[${clearAllMethodName}] No method available to clear memory at all`);
                     }
                 } catch (error) {
-                    console.warn(`[${methodName}] Error clearing all chat messages:`, error);
-                    // Don't throw - allow clear operations to fail gracefully
+                    console.warn(`[${clearAllMethodName}] Error in clearAllChatMessages:`, error);
                 }
             },
-
 
             // Keep existing FlowiseMemory properties and method bindings...
             getMemoryType: () => typeof externalMemory.getMemoryType === 'function'
@@ -1996,8 +2022,17 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             saveContext: externalMemory.saveContext?.bind(externalMemory),
             loadMemoryVariables: externalMemory.loadMemoryVariables?.bind(externalMemory),
             clear: externalMemory.clear?.bind(externalMemory),
+
+            // Add Zep-specific methods that still exist after refactor
+            getFullZepMemory: externalMemory.getFullZepMemory?.bind(externalMemory),
+            getChatFacts: externalMemory.getChatFacts?.bind(externalMemory), // Bind getChatFacts
+            getSessionSummary: externalMemory.getSessionSummary?.bind(externalMemory),
+            // Removed searchKnowledgeGraph as it was likely tied to the SDK/graph features
+
+            // Removed bindings for graph-specific methods
         };
     }
+
     private cleanMessageContent(content: string): string {
         if (!content) return '';
 
@@ -2944,6 +2979,21 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             // Call the handler directly since we're in the CommandHandler class
             await this.commandHandler.handleRumbleAction(adapter, videoId, rumbleAction);
             return;
+        }
+        // Add handler for processfile callbacks
+        else if (data.startsWith('processfile:')) {
+            const methodName = 'handleCallbackQuery';
+            console.log(`[${methodName}] Process file action detected: ${data}`);
+
+            // Ensure CommandHandler is available
+            if (this.commandHandler) {
+                // Delegate the full data string to the CommandHandler's method
+                await this.commandHandler.handleProcessFileAction(adapter, data);
+            } else {
+                console.error(`[${methodName}] CommandHandler not available for processfile action`);
+                await adapter.safeAnswerCallbackQuery('File processing system unavailable');
+            }
+            return; // Handled
         }
         // After other callback handlers
         else if (data.startsWith('standard_menu:')) {
@@ -5447,27 +5497,21 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                 }
             }
 
-            // Convert messages to ExtendedIMessage format
-            const extendedMessages: ExtendedIMessage[] = messages
-                .filter(msg => msg.content)
-                .flatMap((message, index) => {
-                    const content = message.content as string;
+            // Convert messages to the format expected by addChatMessages: { text: string; type: MessageType }[]
+            const extendedMessages: { text: string; type: MessageType }[] = messages
+                .filter(msg => msg.content) // Ensure content exists
+                .flatMap((message) => {
+                    // Ensure content is a string
+                    const contentString = messageContentToString(message.content);
                     const isHuman = message.getType() === 'human';
+                    const messageType: MessageType = isHuman ? 'userMessage' : 'apiMessage';
 
-                    return this.splitMessage(content, 1000).map((chunk, chunkIndex) => ({
-                        message: chunk,
-                        text: chunk,
-                        type: isHuman ? 'userMessage' as MessageType : 'apiMessage' as MessageType,
-                        input: isHuman ? chunk : '',
-                        output: !isHuman ? chunk : '',
-                        metadata: {
-                            userId,
-                            sessionId,
-                            timestamp: Date.now(),
-                            messageId,
-                            index,
-                            chunkIndex
-                        }
+                    // Split potentially long messages (though Zep might handle this)
+                    // Keeping split logic for now, but ensure output matches expected type
+                    return this.splitMessage(contentString, 1000).map((chunk) => ({
+                        text: chunk, // Use 'text' field
+                        type: messageType // Use 'type' field
+                        // No need for input/output/metadata here as addChatMessages in StandaloneZepMemory adds its own
                     }));
                 });
 
@@ -5477,7 +5521,8 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             }
 
             // Add messages to memory
-            await this.memory.addChatMessagesExtended(extendedMessages, userId, sessionId);
+            // Use addChatMessages with overrides instead of the removed addChatMessagesExtended
+            await this.memory.addChatMessages(extendedMessages, sessionId, userId);
 
             logDebug(methodName, `Memory updated successfully`, {
                 userId,
@@ -5542,7 +5587,13 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
 
         try {
 
-            const messages = await this.memory.getChatMessagesExtended(userId, sessionId) as ExtendedIMessage[];
+            // Retrieve messages using the extended method (will be filtered by userId by default in adaptMemory)
+            const messages = await this.memory.getChatMessagesExtended(
+                userId,
+                sessionId,
+                true // returnBaseMessages = true
+                // No prependMessages or overrideUserId needed here for standard history retrieval
+            ) as ExtendedIMessage[];
             logDebug(methodName, `Retrieved ${messages.length} messages for user ${userId} in session ${sessionId}`);
 
             // Log each retrieved message
@@ -8358,42 +8409,78 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         mediaType: string
     ): Promise<void> {
         const methodName = 'handleMediaTranscription';
+        let statusMessageId: number | undefined; // Declare here for wider scope
+
+        // --- Initial Checks ---
         if (!this.conversationManager) {
             logError(methodName, 'ConversationManager is not initialized', new Error('ConversationManager is null'));
             await adapter.reply("I'm sorry, but I'm not ready to process Media yet.");
             return;
         }
+        if (!this.fileManager) {
+             logError(methodName, 'FileManager is not initialized', new Error('FileManager is null'));
+             // Check if it's a callback to answer appropriately
+             if (adapter.context.callbackQuery) {
+                 await adapter.answerCallbackQuery('⚠️ Error: File processing system is not ready.');
+             }
+             await adapter.reply('⚠️ Error: File processing system is not ready.');
+             return;
+         }
+
+        // --- Main Processing ---
         try {
-            // Answer the callback query first
-            await adapter.answerCallbackQuery('Preparing to transcribe...');
-            
+            // Answer the callback query first if applicable
+            if (adapter.context.callbackQuery) {
+                await adapter.answerCallbackQuery('Preparing to transcribe...');
+            }
             // Retrieve the file ID from the cache
             const fileId = this.conversationManager.cache.get<string>(cacheKey);
-            
+
             if (!fileId) {
                 console.error('File ID not found in cache for key:', cacheKey);
                 await adapter.reply('⚠️ Unable to process: the media reference has expired. Please send the media again.');
                 return;
             }
-            
+
             // Update the message if we're responding to a callback query
-            let statusMessageId: number | undefined;
-            if (adapter.context.callbackQuery && 'message' in adapter.context.callbackQuery 
+            // statusMessageId is now declared in the outer scope
+            if (adapter.context.callbackQuery && 'message' in adapter.context.callbackQuery
                 && adapter.context.callbackQuery.message) {
                 statusMessageId = adapter.context.callbackQuery.message.message_id;
                 await adapter.editMessageText('⏳ Downloading file for transcription...', statusMessageId);
             }
-            
+
             try {
                 // Try to get file link
                 const fileLink = await adapter.context.raw.telegram.getFileLink(fileId);
-                
-                // ... (rest of method for processing smaller files)
+                logInfo(methodName, `Got file link for fileId: ${fileId}`); // Log fileId for context
+
+                // FileManager is checked earlier, no need to check again here
+
+                // Download the file to a temporary location
+                await adapter.editMessageText('⏳ Downloading file...', statusMessageId);
+                // Generate a temporary filename using fileId
+                const tempFilename = `telegram_media_${fileId}_${Date.now()}`;
+                const tempFilePath = await this.fileManager.downloadFile(fileLink.href, tempFilename); // Provide filename
+
+                if (typeof tempFilePath === 'string' && tempFilePath) {
+                    logInfo(methodName, `File downloaded to temporary path: ${tempFilePath}`);
+                    // Call the method to handle the actual transcription
+                    await this.processMediaTranscription(adapter, tempFilePath, statusMessageId);
+                    // Note: processMediaTranscription handles further status updates,
+                    // transcription, result storage, and cleanup of the temp file.
+                } else {
+                    logError(methodName, 'Failed to download file or get temporary path', new Error('downloadFile returned invalid path'));
+                    await adapter.editMessageText('⚠️ Error: Failed to download the file for processing.', statusMessageId);
+                    // Clean up the cache entry as we can't proceed
+                    this.conversationManager.cache.del(cacheKey);
+                    return;
+                }
             } catch (error) {
                 // Check if this is a "file too big" error
                 if (error.description && error.description.includes("file is too big")) {
                     console.log("File is too large for Telegram's getFile API (> 20MB)");
-                    
+
                     // Update status message
                     if (statusMessageId) {
                         await adapter.editMessageText(
@@ -8410,24 +8497,46 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                             "For larger files, please use our web interface which supports larger files, or a dedicated transcription service."
                         );
                     }
-                    
+
                     // Clean up the cache entry
                     this.conversationManager.cache.del(cacheKey);
                     return;
                 }
-                
+
                 // If it's a different error, rethrow it
                 throw error;
             }
-            
-            // ... (rest of the method)
-        } catch (error) {
-            console.error('Error handling media transcription:', error);
-            await adapter.answerCallbackQuery('An error occurred. Please try again.');
-            
-            // Send a more detailed error message
-            if (adapter.context.callbackQuery && 'message' in adapter.context.callbackQuery) {
-                await adapter.reply(`⚠️ Error: ${error.message || 'Unknown error'}`);
+
+        } catch (error: any) {
+            logError(methodName, `Error handling media transcription for cacheKey: ${cacheKey}`, error);
+
+            // Try to answer callback query if it exists
+            if (adapter.context.callbackQuery) {
+                try {
+                    await adapter.answerCallbackQuery('An error occurred. Please try again.');
+                } catch (answerError) {
+                    logError(methodName, 'Failed to answer callback query on error', answerError);
+                }
+            }
+
+            // Send a generic error message to the chat
+            // Use editMessageText if possible, otherwise reply
+            const genericErrorMessage = '⚠️ An error occurred while processing the media. Please try again later.';
+            if (statusMessageId) {
+                try {
+                    await adapter.editMessageText(genericErrorMessage, statusMessageId);
+                } catch (editError) {
+                    logError(methodName, `Failed to edit message on final error for cacheKey: ${cacheKey}`, editError);
+                    await adapter.reply(genericErrorMessage); // Fallback reply
+                }
+            } else {
+                await adapter.reply(genericErrorMessage);
+            }
+
+            // Clean up the cache entry as processing failed
+            if (this.conversationManager) { // Ensure manager exists before accessing cache
+                 this.conversationManager.cache.del(cacheKey);
+                 logInfo(methodName, `Cache key ${cacheKey} deleted due to error in final catch block.`);
             }
         }
     }
@@ -8663,79 +8772,79 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                 return;
             }
 
-             // Get some basic info about the media
-        let duration = 0;
-        let fileSize = 0;
-        let fileName = '';
-        
-        if (mediaType === 'video') {
-            duration = message.video?.duration || message.video_note?.duration || 0;
-            fileSize = message.video?.file_size || message.video_note?.file_size || 0;
-            fileName = message.video?.file_name || `video_${Date.now()}`;
-        } else if (mediaType === 'audio') {
-            duration = message.audio?.duration || message.voice?.duration || 0;
-            fileSize = message.audio?.file_size || message.voice?.file_size || 0;
-            fileName = message.audio?.title || message.audio?.file_name || `audio_${Date.now()}`;
-        } else if (mediaType === 'document') {
-            fileSize = message.document.file_size || 0;
-            fileName = message.document.file_name || `file_${Date.now()}`;
-        }
-        
-        // Check if file is too large for Telegram's getFile API (>20MB)
-        const fileSizeMB = fileSize > 0 ? fileSize / (1024 * 1024) : 0;
-        const isFileTooLarge = fileSizeMB > 19.5; // Set threshold slightly under 20MB to be safe
-        
-        // Format size and duration for display
-        const fileSizeDisplay = fileSizeMB > 0 ? fileSizeMB.toFixed(2) + ' MB' : 'Unknown size';
-        const durationText = duration > 0 ? this.formatDuration(duration) : 'Unknown duration';
-        
-        // Check if this is a forwarded message
-        let sourceInfo = '';
-        if (message.forward_from_chat) {
-            const chatTitle = message.forward_from_chat.title || message.forward_from_chat.username || 'an external chat';
-            sourceInfo = `\nForwarded from: ${chatTitle}`;
-        } else if (message.forward_from) {
-            const fromName = message.forward_from.first_name || message.forward_from.username || 'someone';
-            sourceInfo = `\nForwarded from: ${fromName}`;
-        }
-        
-        if (isFileTooLarge) {
-            // For large files, just notify the user about the size limitation
+            // Get some basic info about the media
+            let duration = 0;
+            let fileSize = 0;
+            let fileName = '';
+
+            if (mediaType === 'video') {
+                duration = message.video?.duration || message.video_note?.duration || 0;
+                fileSize = message.video?.file_size || message.video_note?.file_size || 0;
+                fileName = message.video?.file_name || `video_${Date.now()}`;
+            } else if (mediaType === 'audio') {
+                duration = message.audio?.duration || message.voice?.duration || 0;
+                fileSize = message.audio?.file_size || message.voice?.file_size || 0;
+                fileName = message.audio?.title || message.audio?.file_name || `audio_${Date.now()}`;
+            } else if (mediaType === 'document') {
+                fileSize = message.document.file_size || 0;
+                fileName = message.document.file_name || `file_${Date.now()}`;
+            }
+
+            // Check if file is too large for Telegram's getFile API (>20MB)
+            const fileSizeMB = fileSize > 0 ? fileSize / (1024 * 1024) : 0;
+            const isFileTooLarge = fileSizeMB > 19.5; // Set threshold slightly under 20MB to be safe
+
+            // Format size and duration for display
+            const fileSizeDisplay = fileSizeMB > 0 ? fileSizeMB.toFixed(2) + ' MB' : 'Unknown size';
+            const durationText = duration > 0 ? this.formatDuration(duration) : 'Unknown duration';
+
+            // Check if this is a forwarded message
+            let sourceInfo = '';
+            if (message.forward_from_chat) {
+                const chatTitle = message.forward_from_chat.title || message.forward_from_chat.username || 'an external chat';
+                sourceInfo = `\nForwarded from: ${chatTitle}`;
+            } else if (message.forward_from) {
+                const fromName = message.forward_from.first_name || message.forward_from.username || 'someone';
+                sourceInfo = `\nForwarded from: ${fromName}`;
+            }
+
+            if (isFileTooLarge) {
+                // For large files, just notify the user about the size limitation
+                await adapter.reply(
+                    `📂 Detected ${mediaType} file: ${fileName}\n` +
+                    `Size: ${fileSizeDisplay}${mediaType !== 'document' ? `, Duration: ${durationText}` : ''}${sourceInfo}\n\n` +
+                    `⚠️ This file is too large for direct transcription through Telegram (>20MB).\n\n` +
+                    `For larger files, please use our web interface which supports larger files, or a dedicated transcription service.`
+                );
+                return;
+            }
+
+            // For smaller files, proceed with offering transcription
+            // Store the file ID in memory cache for 10 minutes
+            const cacheKey = `fileId_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+            this.conversationManager.cache.set(cacheKey, fileId, 600); // 10 minutes TTL
+
+            // Create keyboard with the cache key
+            const keyboard = Markup.inlineKeyboard([
+                [
+                    Markup.button.callback('📝 Transcribe Audio', `media_transcribe:${cacheKey}:${mediaType}`),
+                ],
+                [
+                    Markup.button.callback('❌ Ignore', `media_ignore:${cacheKey}`)
+                ]
+            ]);
+
+            // Send the offer
             await adapter.reply(
                 `📂 Detected ${mediaType} file: ${fileName}\n` +
                 `Size: ${fileSizeDisplay}${mediaType !== 'document' ? `, Duration: ${durationText}` : ''}${sourceInfo}\n\n` +
-                `⚠️ This file is too large for direct transcription through Telegram (>20MB).\n\n` +
-                `For larger files, please use our web interface which supports larger files, or a dedicated transcription service.`
+                `Would you like me to transcribe the audio from this ${mediaType}?`,
+                { reply_markup: keyboard.reply_markup }
             );
-            return;
+        } catch (error) {
+            console.error('Error handling media detection:', error);
         }
-        
-        // For smaller files, proceed with offering transcription
-        // Store the file ID in memory cache for 10 minutes
-        const cacheKey = `fileId_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-        this.conversationManager.cache.set(cacheKey, fileId, 600); // 10 minutes TTL
-        
-        // Create keyboard with the cache key
-        const keyboard = Markup.inlineKeyboard([
-            [
-                Markup.button.callback('📝 Transcribe Audio', `media_transcribe:${cacheKey}:${mediaType}`),
-            ],
-            [
-                Markup.button.callback('❌ Ignore', `media_ignore:${cacheKey}`)
-            ]
-        ]);
-        
-        // Send the offer
-        await adapter.reply(
-            `📂 Detected ${mediaType} file: ${fileName}\n` +
-            `Size: ${fileSizeDisplay}${mediaType !== 'document' ? `, Duration: ${durationText}` : ''}${sourceInfo}\n\n` +
-            `Would you like me to transcribe the audio from this ${mediaType}?`,
-            { reply_markup: keyboard.reply_markup }
-        );
-    } catch (error) {
-        console.error('Error handling media detection:', error);
     }
-}
     /**
      * Format seconds into readable duration
      */

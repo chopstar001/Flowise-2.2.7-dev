@@ -152,11 +152,11 @@ importers:
         specifier: ^3.9.25
         version: 3.9.25
       '@getzep/zep-cloud':
-        specifier: ~1.0.7
-        version: 1.0.7(@langchain/core@0.3.37(openai@4.82.0(encoding@0.1.13)(ws@8.18.0(bufferutil@4.0.8)(utf-8-validate@6.0.4))(zod@3.22.4)))(encoding@0.1.13)(langchain@0.3.5(2382828862f03de3af8ce67ea4a69cd2))
+        specifier: github:getzep/zep-js#v2.7.0
+        version: https://codeload.github.com/getzep/zep-js/tar.gz/34629c7fc31c838c44d0a059f33ae773f47d0a53(encoding@0.1.13)
       '@getzep/zep-js':
-        specifier: ^0.9.0
-        version: 0.9.0
+        specifier: 2.1.0-rc.1
+        version: 2.1.0-rc.1(@langchain/core@0.3.37(openai@4.82.0(encoding@0.1.13)(ws@8.18.0(bufferutil@4.0.8)(utf-8-validate@6.0.4))(zod@3.22.4)))(encoding@0.1.13)(langchain@0.3.5(2382828862f03de3af8ce67ea4a69cd2))
       '@gomomento/sdk':
         specifier: ^1.51.1
         version: 1.68.1(encoding@0.1.13)
@@ -186,7 +186,7 @@ importers:
         version: 0.0.7(encoding@0.1.13)(openai@4.82.0(encoding@0.1.13)(ws@8.18.0(bufferutil@4.0.8)(utf-8-validate@6.0.4))(zod@3.22.4))
       '@langchain/community':
         specifier: ^0.3.24
-        version: 0.3.24(491648e77c3c59f3efd2a612cd82cdb4)
+        version: 0.3.24(313e38c19b7a890ceadf59af49545a4d)
       '@langchain/core':
         specifier: 0.3.37
         version: 0.3.37(openai@4.82.0(encoding@0.1.13)(ws@8.18.0(bufferutil@4.0.8)(utf-8-validate@6.0.4))(zod@3.22.4))
@@ -3396,8 +3396,12 @@ packages:
   '@gar/promisify@1.1.3':
     resolution: {integrity: sha512-k2Ty1JcVojjJFwrg/ThKi2ujJ7XNLYaFGNB/bWT9wGR+oSMJHMa5w+CUq6p/pVrKeNNgA7pCqEcjSnHVoqJQFw==}
 
-  '@getzep/zep-cloud@1.0.7':
-    resolution: {integrity: sha512-QL0v8SBqDVm/CX447pAGaw55hIE8U3WfOCjmiGx/S0ICamtJFRmVZDeOpCzb6sPPxVE9OjaSaCuW8ORvzHb2Ew==}
+  '@getzep/zep-cloud@https://codeload.github.com/getzep/zep-js/tar.gz/34629c7fc31c838c44d0a059f33ae773f47d0a53':
+    resolution: {tarball: https://codeload.github.com/getzep/zep-js/tar.gz/34629c7fc31c838c44d0a059f33ae773f47d0a53}
+    version: 2.7.0
+
+  '@getzep/zep-js@2.1.0-rc.1':
+    resolution: {integrity: sha512-/hd7OvSN0I3k8gaAUa4omRAC/SH54ZitOZWqAq/gju2ybLsCI2CXFROoV3TB3FhiwnEzq5cJ8BOPhwogmuCquA==}
     peerDependencies:
       '@langchain/core': 0.3.37
       langchain: ~0.1.19
@@ -3406,10 +3410,6 @@ packages:
         optional: true
       langchain:
         optional: true
-
-  '@getzep/zep-js@0.9.0':
-    resolution: {integrity: sha512-GNaH7EwAisAaMuaUZzOR3hk3yTc7LXrqboPfSN6mZE0rAWGHOjT7V53Hec6yFJqFyXs4/7DsJvZlOcs+gEygNQ==}
-    engines: {node: '>=18.0.0'}
 
   '@gomomento/generated-types@0.106.1':
     resolution: {integrity: sha512-ZU4UwavbZArUoF/5nlRnKgriSZ1CJTNcYa/LhIlOcUuCGIBKi4W1+/rd/q/M5g9SspMdTawywRgncGYqwjrUpw==}
@@ -6074,10 +6074,6 @@ packages:
 
   '@supabase/supabase-js@2.39.8':
     resolution: {integrity: sha512-WpiawHjseIRcCQTZbMJtHUSOepz5+M9qE1jP9BDmg8X7ehALFwgEkiKyHAu59qm/pKP2ryyQXLtu2XZNRbUarw==}
-
-  '@supercharge/promise-pool@3.1.1':
-    resolution: {integrity: sha512-TgCm6jVqMPv+OgD5uBNND/CkCwNDdXPQlcprtnXsWSBpTCy0q5CI6vRj+jsUiXE1xeRaKIX4UeaYJqzZBL92sg==}
-    engines: {node: '>=8'}
 
   '@surma/rollup-plugin-off-main-thread@2.2.3':
     resolution: {integrity: sha512-lR8q/9W7hZpMWweNiAKU7NQerBnzQQLvi8qnTDU/fxItPhtZVMbPV3lbCwjhIlNBe9Bbr5V+KHshvWmVSG9cxQ==}
@@ -14564,6 +14560,10 @@ packages:
     resolution: {integrity: sha512-+38qI9SOr8tfZ4QmJNplMUxqjbe7LKvvZgWdExBOmd+egZTtjLB67Gu0HRX3u/XOq7UU2Nx6nsjvS16Z9uwfpg==}
     engines: {node: '>=0.6'}
 
+  qs@6.14.0:
+    resolution: {integrity: sha512-YWWTjgABSKcvs/nWBi9PycY/JiPJqOD4JA6o9Sej2AtvSGarXxKC3OQSk4pAarbdQlKAh5D4FCQkJNkW+GAn3w==}
+    engines: {node: '>=0.6'}
+
   qs@6.5.3:
     resolution: {integrity: sha512-qxXIEh4pCGfHICj1mAJQ2/2XVZkjCDTcEgfoSQxc/fYivUZxTkk7L3bDBJSoNrEzXI17oUO5Dp07ktqE5KzczA==}
     engines: {node: '>=0.6'}
@@ -21662,24 +21662,29 @@ snapshots:
 
   '@gar/promisify@1.1.3': {}
 
-  '@getzep/zep-cloud@1.0.7(@langchain/core@0.3.37(openai@4.82.0(encoding@0.1.13)(ws@8.18.0(bufferutil@4.0.8)(utf-8-validate@6.0.4))(zod@3.22.4)))(encoding@0.1.13)(langchain@0.3.5(2382828862f03de3af8ce67ea4a69cd2))':
+  '@getzep/zep-cloud@https://codeload.github.com/getzep/zep-js/tar.gz/34629c7fc31c838c44d0a059f33ae773f47d0a53(encoding@0.1.13)':
+    dependencies:
+      form-data: 4.0.1
+      formdata-node: 6.0.3
+      node-fetch: 2.7.0(encoding@0.1.13)
+      qs: 6.14.0
+      readable-stream: 4.5.2
+      url-join: 4.0.1
+      zod: 3.24.2
+    transitivePeerDependencies:
+      - encoding
+
+  '@getzep/zep-js@2.1.0-rc.1(@langchain/core@0.3.37(openai@4.82.0(encoding@0.1.13)(ws@8.18.0(bufferutil@4.0.8)(utf-8-validate@6.0.4))(zod@3.22.4)))(encoding@0.1.13)(langchain@0.3.5(2382828862f03de3af8ce67ea4a69cd2))':
     dependencies:
       form-data: 4.0.0
       node-fetch: 2.7.0(encoding@0.1.13)
       qs: 6.11.2
       url-join: 4.0.1
-      zod: 3.23.8
     optionalDependencies:
       '@langchain/core': 0.3.37(openai@4.82.0(encoding@0.1.13)(ws@8.18.0(bufferutil@4.0.8)(utf-8-validate@6.0.4))(zod@3.22.4))
       langchain: 0.3.5(2382828862f03de3af8ce67ea4a69cd2)
     transitivePeerDependencies:
       - encoding
-
-  '@getzep/zep-js@0.9.0':
-    dependencies:
-      '@supercharge/promise-pool': 3.1.1
-      semver: 7.7.1
-      typescript: 5.5.2
 
   '@gomomento/generated-types@0.106.1(encoding@0.1.13)':
     dependencies:
@@ -22225,7 +22230,7 @@ snapshots:
       - encoding
       - openai
 
-  '@langchain/community@0.3.24(491648e77c3c59f3efd2a612cd82cdb4)':
+  '@langchain/community@0.3.24(313e38c19b7a890ceadf59af49545a4d)':
     dependencies:
       '@browserbasehq/stagehand': 1.9.0(@playwright/test@1.49.1)(bufferutil@4.0.8)(deepmerge@4.3.1)(dotenv@16.4.5)(encoding@0.1.13)(openai@4.82.0(encoding@0.1.13)(ws@8.18.0(bufferutil@4.0.8)(utf-8-validate@6.0.4))(zod@3.22.4))(utf-8-validate@6.0.4)(zod@3.22.4)
       '@ibm-cloud/watsonx-ai': 1.1.2
@@ -22253,8 +22258,8 @@ snapshots:
       '@browserbasehq/sdk': 2.0.0(encoding@0.1.13)
       '@datastax/astra-db-ts': 1.5.0
       '@elastic/elasticsearch': 8.12.2
-      '@getzep/zep-cloud': 1.0.7(@langchain/core@0.3.37(openai@4.82.0(encoding@0.1.13)(ws@8.18.0(bufferutil@4.0.8)(utf-8-validate@6.0.4))(zod@3.22.4)))(encoding@0.1.13)(langchain@0.3.5(2382828862f03de3af8ce67ea4a69cd2))
-      '@getzep/zep-js': 0.9.0
+      '@getzep/zep-cloud': https://codeload.github.com/getzep/zep-js/tar.gz/34629c7fc31c838c44d0a059f33ae773f47d0a53(encoding@0.1.13)
+      '@getzep/zep-js': 2.1.0-rc.1(@langchain/core@0.3.37(openai@4.82.0(encoding@0.1.13)(ws@8.18.0(bufferutil@4.0.8)(utf-8-validate@6.0.4))(zod@3.22.4)))(encoding@0.1.13)(langchain@0.3.5(2382828862f03de3af8ce67ea4a69cd2))
       '@gomomento/sdk': 1.68.1(encoding@0.1.13)
       '@gomomento/sdk-core': 1.68.1
       '@google-ai/generativelanguage': 2.6.0(encoding@0.1.13)
@@ -25097,8 +25102,6 @@ snapshots:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
-
-  '@supercharge/promise-pool@3.1.1': {}
 
   '@surma/rollup-plugin-off-main-thread@2.2.3':
     dependencies:
@@ -28514,7 +28517,7 @@ snapshots:
       object-keys: 1.1.1
       object.assign: 4.1.5
       regexp.prototype.flags: 1.5.2
-      side-channel: 1.0.6
+      side-channel: 1.1.0
       which-boxed-primitive: 1.0.2
       which-collection: 1.0.2
       which-typed-array: 1.1.15
@@ -29035,7 +29038,7 @@ snapshots:
   es-get-iterator@1.1.3:
     dependencies:
       call-bind: 1.0.7
-      get-intrinsic: 1.2.4
+      get-intrinsic: 1.3.0
       has-symbols: 1.0.3
       is-arguments: 1.1.1
       is-map: 2.0.3
@@ -31369,7 +31372,7 @@ snapshots:
     dependencies:
       es-errors: 1.3.0
       hasown: 2.0.2
-      side-channel: 1.0.6
+      side-channel: 1.1.0
 
   internal-slot@1.1.0:
     dependencies:
@@ -35816,7 +35819,7 @@ snapshots:
 
   qs@6.10.4:
     dependencies:
-      side-channel: 1.0.6
+      side-channel: 1.1.0
 
   qs@6.11.0:
     dependencies:
@@ -35824,11 +35827,15 @@ snapshots:
 
   qs@6.11.2:
     dependencies:
-      side-channel: 1.0.6
+      side-channel: 1.1.0
 
   qs@6.13.0:
     dependencies:
-      side-channel: 1.0.6
+      side-channel: 1.1.0
+
+  qs@6.14.0:
+    dependencies:
+      side-channel: 1.1.0
 
   qs@6.5.3: {}
 

@@ -1,4 +1,4 @@
-import { ZepMemory, ZepMemoryInput } from '@getzep/zep-cloud/langchain'
+import { ZepMemory, ZepMemoryInput } from '@getzep/zep-js/langchain'
 import { BaseMessage } from '@langchain/core/messages'
 import { InputValues, MemoryVariables, OutputValues } from 'langchain/memory'
 import { ICommonObject } from '../../../src'

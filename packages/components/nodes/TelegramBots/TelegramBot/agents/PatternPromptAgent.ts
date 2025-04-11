@@ -765,87 +765,93 @@ export class PatternPromptAgent extends BaseAgent {
     }
     // Add a pattern in PatternPromptAgent.ts
     public async processForPDF(
-        patternName: string,
+        patternName: string, // patternName might not be strictly needed anymore if we use a generic structure prompt
         input: string,
         adapter: ContextAdapter
-    ): Promise<string> {
-        // Create a specific system prompt for PDF-formatted content that preserves original message
-        const systemPrompt = `You are an expert document content analyst tasked with providing excellent structural formatting of any writing or body of text to PDF.
-        
-    IMPORTANT: Do NOT change the meaning, message, intent, or wording of the original content. Your task is ONLY to improve the structural formatting while preserving the exact language of the source material.
-    
-    Take a deep breath and think step by step about how to best accomplish this goal using the following steps. 
+    ): Promise<string | { type: 'structured_content', sections: Array<{ type: string, content: string, level?: number }> }> {
+        // New system prompt focused on identifying structure, not reformatting
+        const systemPrompt = `You are an expert content analyst. Your task is to analyze the following text and identify its structure.
+Break the text down into logical sections like headings, subheadings, paragraphs, bullet points, numbered list items, and quotes.
+Preserve the EXACT original wording of each segment.
 
-    First, identify what type of content this is (transcript, article, notes, etc.) and then apply appropriate formatting:
-    
-    Guidelines:
-    - Preserve ALL original wording, terminology, and meaning
-    - Add organizational structure without changing content
-    - Structure the content logically into clear sections where appropriate
-    - Use # for main headings and ## for subheadings when needed for organization
-    - For content that represents lists, format with bullet points (- or •) or numbered lists (1., 2., etc.)
-    - Enclose direct quotes in "quotation marks"
-    - Ensure proper spacing between paragraphs and sections
-    - If needed, add simple informative headings that reflect the existing content (like "Introduction" or "Key Points")
-    - DO NOT add your own analysis, summaries, or change the language style
-    
-    Example of acceptable changes:
-    Original: "the main points were first that AI is changing rapidly second we need new regulations and third more research is needed"
-    
-    Formatted: 
-    ## Main Points
-    1. AI is changing rapidly
-    2. We need new regulations
-    3. More research is needed
-    
-    Remember: Your role is strictly to improve readability through formatting, NOT to rewrite or modify the substance of the content.`;
-    
-        // Get the response from LLM
+Respond ONLY with a JSON object containing a single key "sections". The value should be an array of objects, where each object has:
+- "type": (string) One of "heading", "subheading", "paragraph", "list-item", "numbered-item", "quote".
+- "content": (string) The EXACT original text content of the segment.
+- "level": (number, optional) For headings/subheadings, indicate the level (1 for main heading, 2 for subheading, etc.). For list items, indicate indentation level if nested (though we'll keep it simple for now).
+
+Example Input:
+# Main Title
+Some introductory text.
+## Sub Point 1
+- Bullet one
+- Bullet two
+1. Numbered one
+2. Numbered two
+> A quote here.
+
+Example JSON Output:
+{
+  "sections": [
+    { "type": "heading", "content": "Main Title", "level": 1 },
+    { "type": "paragraph", "content": "Some introductory text." },
+    { "type": "subheading", "content": "Sub Point 1", "level": 2 },
+    { "type": "list-item", "content": "Bullet one" },
+    { "type": "list-item", "content": "Bullet two" },
+    { "type": "numbered-item", "content": "Numbered one" },
+    { "type": "numbered-item", "content": "Numbered two" },
+    { "type": "quote", "content": "A quote here." }
+  ]
+}
+
+Analyze the following text:`;
+
         const messages = [
             new SystemMessage(systemPrompt),
             new HumanMessage(input)
         ];
-    
+
         try {
             if (!this.conversationManager) {
                 throw new Error('ConversationManager not initialized');
             }
-            console.log(`[processForPDF] Processing content of length ${input.length} for pattern: ${patternName}`);
+            console.log(`[processForPDF] Analyzing content structure for PDF, input length: ${input.length}`);
             const response: AIMessage = await invokeModelWithFallback(
-                this.conversationManager.SpModel,
+                this.conversationManager.SpModel, // Use a capable model for JSON structure
                 this.conversationManager.chatModel,
                 this.conversationManager.summationModel,
                 messages,
                 { initialTimeout: 60000, maxTimeout: 120000, retries: 2 }
             );
-    
-            const contentWithoutThinkTags = this.thinkingManager!.cleanThinkTags(response.content) as string;
-            
-            console.log(`[processForPDF] Successfully formatted content for PDF, output length: ${contentWithoutThinkTags.length}`);
-            return contentWithoutThinkTags;
+
+            const cleanedResponse = this.thinkingManager!.cleanThinkTags(response.content) as string;
+            const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+                console.error("[processForPDF] Failed to extract JSON structure from LLM response.");
+                throw new Error("LLM did not return valid JSON structure");
+            }
+
+            const structuredData = JSON.parse(jsonMatch[0]);
+
+            // Basic validation
+            if (!structuredData || !Array.isArray(structuredData.sections)) {
+                 console.error("[processForPDF] Invalid JSON structure received:", structuredData);
+                 throw new Error("Invalid JSON structure received from LLM");
+            }
+
+            console.log(`[processForPDF] Successfully extracted structured content for PDF: ${structuredData.sections.length} sections.`);
+            // Return the structured data directly
+            return { type: 'structured_content', sections: structuredData.sections };
+
         } catch (error) {
-            console.error(`[processForPDF] Error formatting content for PDF:`, error);
-            // In case of error, return the original content with minimal formatting
-            console.log(`[processForPDF] Falling back to original content with minimal formatting`);
-            return this.applyMinimalFormatting(input);
+            console.error(`[processForPDF] Error analyzing content structure for PDF:`, error);
+            // Fallback: return the original content as a plain string
+            console.log(`[processForPDF] Falling back to original content due to error.`);
+            return input; // Return original string on error
         }
     }
     
-    // Fallback method to apply minimal formatting if the LLM call fails
-    private applyMinimalFormatting(input: string): string {
-        // Add a basic title if none exists
-        let formatted = input;
-        
-        // Check if the content already has headings
-        if (!formatted.includes('# ')) {
-            formatted = `# Document\n\n${formatted}`;
-        }
-        
-        // Ensure proper spacing between paragraphs
-        formatted = formatted.replace(/\n{3,}/g, '\n\n');
-        
-        return formatted;
-    }
+    // Removed applyMinimalFormatting method as it's no longer the primary fallback mechanism here.
+    // The fallback is now just returning the original string.
 
     public getPatternsByCategory(category: string): Pattern[] {
         return Array.from(this.patterns.entries())

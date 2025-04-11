@@ -208,40 +208,19 @@ How can I assist you today?`;
                         const chunk = messageChunks[i];
                         try {
                             const timestamp = Date.now();  // Use milliseconds timestamp
-                            await memory.addChatMessagesExtended([
+                            // Convert messages to the expected format { text: string; type: MessageType }
+                            const messagesToAdd: { text: string; type: MessageType }[] = [
                                 {
-                                    message: i === 0 ? '/start' : 'Continued...',
                                     text: i === 0 ? '/start' : 'Continued...',
-                                    type: 'userMessage',
-                                    metadata: {
-                                        userId: normalizedUserId,
-                                        sessionId: normalizedSessionId,
-                                        timestamp,  // Use number timestamp
-                                        chunkIndex: i,
-                                        totalChunks: messageChunks.length,
-                                        interface: isWebapp ? 'webapp' : 'telegram',
-                                        timestampFormatted: new Date(timestamp).toLocaleString('en-AU', {
-                                            timeZone: 'Australia/Brisbane'
-                                        })  // Keep formatted time as additional info
-                                    }
-                                } as ExtendedIMessage,
+                                    type: 'userMessage' as MessageType
+                                },
                                 {
-                                    message: chunk,
                                     text: chunk,
-                                    type: 'apiMessage',
-                                    metadata: {
-                                        userId: normalizedUserId,
-                                        sessionId: normalizedSessionId,
-                                        timestamp,  // Use number timestamp
-                                        chunkIndex: i,
-                                        totalChunks: messageChunks.length,
-                                        interface: isWebapp ? 'webapp' : 'telegram',
-                                        timestampFormatted: new Date(timestamp).toLocaleString('en-AU', {
-                                            timeZone: 'Australia/Brisbane'
-                                        })  // Keep formatted time as additional info
-                                    }
-                                } as ExtendedIMessage
-                            ], normalizedUserId, normalizedSessionId);
+                                    type: 'apiMessage' as MessageType
+                                }
+                            ];
+                            // Call addChatMessages with correct arguments
+                            await memory.addChatMessages(messagesToAdd, normalizedSessionId, normalizedUserId);
 
                             console.log(`[${methodName}] Stored memory chunk ${i + 1}/${messageChunks.length}`, {
                                 timestamp,

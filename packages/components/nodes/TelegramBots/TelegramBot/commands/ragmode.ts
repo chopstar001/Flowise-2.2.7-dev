@@ -132,10 +132,16 @@ export const ragModeCommand: Command = {
             for (let i = 0; i < messageChunks.length; i++) {
                 const chunk = messageChunks[i];
                 const chunkMessages: ExtendedIMessage[] = [
-                    { message: i === 0 ? '/ragmode' : 'Continued...', text: i === 0 ? '/ragmode' : 'Continued...', type: 'userMessage' as MessageType },
-                    { message: chunk, text: chunk, type: 'apiMessage' as MessageType }
+                    { message: i === 0 ? '/ragmode' : 'Continued...', text: i === 0 ? '/ragmode' : 'Continued...', type: 'userMessage' },
+                    { message: chunk, text: chunk, type: 'apiMessage' }
                 ];
-                await memory.addChatMessagesExtended(chunkMessages, userId, sessionId);
+                 // Convert messages to the expected format { text: string; type: MessageType }
+                 const messagesToAdd: { text: string; type: MessageType }[] = chunkMessages.map(msg => ({
+                    text: msg.text as string, // Assuming text is always string here
+                    type: msg.type as MessageType
+                }));
+                // Call addChatMessages with correct arguments
+                await memory.addChatMessages(messagesToAdd, sessionId, userId);
             }
         }
 

@@ -24,7 +24,8 @@ import {
     PatternContextData,
     PatternData,
     ContextRequirement,
-    TranscriptionEstimate
+    TranscriptionEstimate,
+    TranscriptionOptions // Import TranscriptionOptions
 } from './commands/types';
 import { fsync } from 'fs';
 // At the top of CommandHandler.ts with other imports
@@ -32,8 +33,20 @@ import {
     transcriptionSettingsCommand,
     createTranscriptionSettingsKeyboard,
     formatTranscriptionSettingsMessage,
-    TranscriptionSettingsUtil
+    TranscriptionSettingsUtil,
+    TranscriptionSettings // Import TranscriptionSettings type
 } from './commands/transcriptionsettings';
+import { decodeFilename } from './commands/processfolder'; // Add this import
+import * as path from 'path'; // Ensure path is imported
+
+// Helper function to escape characters for Telegram HTML parsing
+const escapeTelegramHTML = (text: string): string => {
+    if (!text) return '';
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+};
 
 const transcriptionEstimates = new Map<string, TranscriptionEstimate>();
 
@@ -290,6 +303,31 @@ export class CommandHandler {
                 const action = ctx.match[1];
                 const value = ctx.match[3];
                 await this.handleTranscriptionSettingsAction(adapter, action, value);
+            });
+            // Ensure processfile action handlers are registered within registerCommands
+            this.bot.action(/^processfile:(.+)$/, async (ctx) => {
+                 if (!ctx.match || !ctx.match[1]) return; // Add null check for safety
+                 const adapter = new ContextAdapter(ctx, this.promptManager);
+                 const callbackData = ctx.match[1];
+                 await this.handleProcessFileAction(adapter, `processfile:${callbackData}`);
+             });
+             this.bot.action('processfile_cancel', async (ctx) => {
+                 const adapter = new ContextAdapter(ctx, this.promptManager);
+                 await this.handleProcessFileAction(adapter, 'processfile:cancel');
+            });
+            // Add the new action handler registration for processfile
+            this.bot.action(/^processfile:(.+)$/, async (ctx) => {
+                const adapter = new ContextAdapter(ctx, this.promptManager);
+                const callbackData = ctx.match[1]; // Extract data after "processfile:"
+                // Pass the full callback data string including the prefix
+                await this.handleProcessFileAction(adapter, `processfile:${callbackData}`);
+            });
+
+             // Add handler for the cancel button specifically
+             this.bot.action('processfile_cancel', async (ctx) => {
+                const adapter = new ContextAdapter(ctx, this.promptManager);
+                // Call the handler with a specific cancel action format
+                await this.handleProcessFileAction(adapter, 'processfile:cancel');
             });
             await this.bot.telegram.setMyCommands(botCommands);
             console.log('Bot commands set successfully');
@@ -4078,8 +4116,10 @@ export class CommandHandler {
                 if (patternAgent) {
                     try {
                         // Format the content for PDF
-                        const formattedContent = await patternAgent.processForPDF('format_for_pdf', content, adapter);
-                        await this.fileManager.saveAndSendAsPDF(adapter, formattedContent, title);
+                        const pdfContent = await patternAgent.processForPDF('format_for_pdf', content, adapter);
+                        // Pass either the structured content object or the fallback string to saveAndSendAsPDF
+                        // Note: This will require updating saveAndSendAsPDF in FileManager to accept the object type.
+                        await this.fileManager.saveAndSendAsPDF(adapter, pdfContent, title);
                     } catch (error) {
                         // Fall back to regular content if formatting fails
                         console.warn(`Failed to format content for PDF: ${error.message}`);
@@ -4624,6 +4664,298 @@ export class CommandHandler {
                 reply_markup: keyboard.reply_markup
             }
         );
+    } // End of showLanguagePage
+
+    // Add the handleProcessFileAction method INSIDE the class
+    public async handleProcessFileAction(adapter: ContextAdapter, data: string): Promise<void> {
+        const methodName = 'handleProcessFileAction';
+        console.log(`[${methodName}] Received action data: ${data}`);
+
+        const parts = data.split(':');
+        // Expecting "processfile:{index}" or "processfile:cancel"
+        if (parts.length < 2 || parts[0] !== 'processfile') {
+            console.warn(`[${methodName}] Invalid callback data format: ${data}`);
+            await adapter.safeAnswerCallbackQuery('Invalid action data.');
+            return;
+        }
+
+        const identifier = parts[1]; // This is the index or 'cancel'
+        const subAction = parts[2] || 'transcribe'; // Default to transcribe (though not used with index)
+
+        // Handle cancel action
+        if (identifier === 'cancel') {
+            try {
+                await adapter.editMessageText('File processing cancelled.');
+                // Optionally delete the message after a delay
+                setTimeout(() => adapter.deleteMessage().catch(e => console.warn("Failed to delete cancel message:", e)), 5000);
+            } catch (e) { console.error("Error cancelling:", e); }
+            await adapter.safeAnswerCallbackQuery('Cancelled.');
+            return;
+        }
+
+        // --- Retrieve filename from cache using index ---
+        const fileIndex = parseInt(identifier, 10);
+        if (isNaN(fileIndex)) {
+            console.error(`[${methodName}] Invalid file index received: ${identifier}`);
+            await adapter.safeAnswerCallbackQuery('Invalid file selection.');
+            return;
+        }
+
+        const context = adapter.getMessageContext();
+        const { userId } = await this.conversationManager!.getSessionInfo(adapter);
+        // Get the message ID of the *original message containing the buttons*
+        const messageId = context.raw?.callbackQuery?.message?.message_id;
+
+        if (!messageId) {
+            console.error(`[${methodName}] Could not get message ID from callback query context.`);
+            await adapter.safeAnswerCallbackQuery('Error identifying the original message.');
+            return;
+        }
+
+        const filesCacheKey = `processfolder_files:${userId}:${messageId}`;
+        const cachedFiles = this.conversationManager!.cache.get<string[]>(filesCacheKey);
+
+        if (!cachedFiles || fileIndex < 0 || fileIndex >= cachedFiles.length) {
+            console.error(`[${methodName}] File list not found in cache or index out of bounds. Key: ${filesCacheKey}, Index: ${fileIndex}`);
+            await adapter.safeAnswerCallbackQuery('File selection expired or invalid. Please run /processfolder again.');
+            // Attempt to clean up the potentially broken menu
+            try { await adapter.deleteMessage(messageId); } catch (e) { /* ignore */ }
+            return;
+        }
+
+        const fileName = cachedFiles[fileIndex];
+        console.log(`[${methodName}] Retrieved filename from cache: ${fileName} at index ${fileIndex}`);
+        // --- End filename retrieval ---
+
+        console.log(`[${methodName}] Action: ${subAction}, Filename: ${fileName}`);
+
+        // User ID and message ID already retrieved above for cache lookup
+
+        if (!messageId) {
+            console.error(`[${methodName}] Could not get message ID from context.`);
+            await adapter.safeAnswerCallbackQuery('Error identifying message.');
+            return;
+        }
+
+        // Retrieve cached command arguments
+        const argsCacheKey = `processfolder_args:${userId}:${messageId}`;
+        const cachedArgs = this.conversationManager!.cache.get<Partial<TranscriptionOptions>>(argsCacheKey) || {};
+        console.log(`[${methodName}] Retrieved cached args for message ${messageId}:`, cachedArgs);
+
+        // Get user's saved settings
+        const userSettings = TranscriptionSettingsUtil.getUserSettings(userId, this.conversationManager!);
+
+        // Merge settings: cached command args override user settings
+        const finalOptions: TranscriptionOptions = {
+            provider: cachedArgs.provider || userSettings.provider,
+            modelSize: cachedArgs.modelSize || userSettings.modelSize,
+            language: cachedArgs.language || userSettings.language,
+            // outputDirectory is handled internally by processSingleFileAndMove
+        };
+
+        // Get transcription service
+        const transcriptionService = this.telegramBot?.getTranscriptionService();
+        if (!transcriptionService) {
+            await adapter.editMessageText('❌ Transcription service is unavailable.');
+            await adapter.safeAnswerCallbackQuery('Service unavailable.');
+            return;
+        }
+
+        // Construct full file path using the path from the service
+        const inputFolderPath = transcriptionService.inputFolderPath;
+        const fullFilePath = path.join(inputFolderPath, fileName);
+
+        console.log(`[${methodName}] Full file path: ${fullFilePath}`);
+        console.log(`[${methodName}] Using final options:`, finalOptions);
+
+        // Edit the original message to show processing status
+        let statusMessage = `⏳ Processing \`${fileName}\`...`;
+        try {
+            // Ensure messageId is passed correctly
+             const editOptions: ExtraEditMessageText = { parse_mode: 'Markdown' };
+             await adapter.editMessageText(statusMessage, typeof messageId === 'number' ? messageId : editOptions);
+
+        } catch (e) {
+            console.warn(`[${methodName}] Error editing message initially:`, e);
+            // If editing fails, try sending a new status message
+            await adapter.reply(statusMessage);
+        }
+        await adapter.safeAnswerCallbackQuery('Processing...'); // Acknowledge the button press
+
+        // Define status callback for the service
+        const statusCallback = async (rawStatus: string) => {
+            // Declare sanitizedStatus outside the try block
+            let sanitizedStatus = '';
+            try {
+                // Sanitize the status before appending
+                sanitizedStatus = escapeTelegramHTML(rawStatus);
+                // Append new status, keeping previous lines if possible
+                // Use HTML for status messages now
+                statusMessage += `\n${sanitizedStatus}`;
+                 // Truncate if too long for Telegram
+                if (statusMessage.length > 4000) {
+                    statusMessage = "..." + statusMessage.substring(statusMessage.length - 3997);
+                }
+                 // Ensure messageId is passed correctly and use HTML parse mode
+                 const editOptions: ExtraEditMessageText = { parse_mode: 'HTML' };
+                 await adapter.editMessageText(statusMessage, typeof messageId === 'number' ? messageId : editOptions);
+            } catch (error) {
+                console.warn(`[${methodName}] Error updating status via editMessageText: ${error.message}`);
+                 // Fallback: send new message if edit fails (also sanitize)
+                 try {
+                    await adapter.reply(sanitizedStatus); // Send sanitized status
+                 } catch (replyError) {
+                    console.error(`[${methodName}] Failed to send status update as new message: ${replyError.message}`);
+                 }
+            }
+        };
+
+        // Execute transcription
+        try {
+            const transcriptionResult = await transcriptionService.processSingleFileAndMove(
+                fullFilePath,
+                finalOptions,
+                statusCallback
+            );
+
+            // --- Start: Caching logic for pattern processing ---
+            const patternDataKey = `pattern_data:${userId}`;
+            let patternData = this.conversationManager!.cache.get<PatternData>(patternDataKey) || {
+                originalInput: '',
+                processedOutputs: {},
+                currentPatternState: {}
+            };
+
+            // Store the result as originalInput for pattern processing
+            patternData.originalInput = transcriptionResult;
+
+            // Also store it as a processed output
+            patternData.processedOutputs["raw_processed_file_transcript"] = {
+                output: transcriptionResult,
+                timestamp: Date.now()
+            };
+
+            // Add file metadata to the pattern data
+            patternData.sourceInfo = {
+                type: 'processed_file',
+                url: `file://${fileName}`, // Represent as a file URI
+                title: `Processed File: ${fileName}`,
+                metadata: {
+                    fileName: fileName,
+                    processedTime: new Date().toISOString()
+                }
+            };
+
+            this.conversationManager!.cache.set(patternDataKey, patternData, 14400); // 4 hours
+
+            // Define a pattern suggestion for processed transcripts
+            const processedFilePatternSuggestion = {
+                pattern: 'summarize_transcript', // Example pattern
+                confidence: 0.9,
+                alternativePatterns: [
+                    'extract_insights',
+                    'summarize',
+                    'create_qa_pairs'
+                ]
+            };
+
+            // For storing in context cache for pattern suggestions
+            const contextData = {
+                input: transcriptionResult,
+                interactionType: 'general_input' as InteractionType,
+                contextRequirement: 'chat' as ContextRequirement,
+                timestamp: Date.now(),
+                metadata: {
+                    source: 'processed_file',
+                    fileName: fileName,
+                    suggestion: processedFilePatternSuggestion
+                }
+            };
+            this.conversationManager!.cache.set(`pattern_context:${userId}`, contextData, 14400); // 4 hours
+            // --- End: Caching logic ---
+            // Try sending the transcript as a file and show pattern menu
+            try {
+                // Send a preview message
+                const preview = transcriptionResult.substring(0, 500) + "...";
+                await adapter.reply(`✅ Successfully transcribed \`${fileName}\`.\n\nPreview:\n${preview}\n\nSending full transcript as a file...`, { parse_mode: 'Markdown' });
+
+                // Create a descriptive filename
+                const baseFileName = fileName.substring(0, fileName.lastIndexOf('.')) || fileName;
+                const transcriptFilename = `processed_transcript_${baseFileName}_${new Date().toISOString().slice(0, 10)}`;
+
+                // Ensure FileManager is initialized
+                if (!this.fileManager) {
+                    this.fileManager = new FileManager(this.telegramBot?.getBotToken());
+                }
+                await this.fileManager.saveAndSendAsText(adapter, transcriptionResult, transcriptFilename);
+
+                // Show the pattern suggestion menu
+                if (this.menuManager) {
+                    const keyboard = this.menuManager.createPatternSelectionMenu(
+                        processedFilePatternSuggestion,
+                        processedFilePatternSuggestion.alternativePatterns
+                    ).reply_markup;
+
+                    await adapter.reply(
+                        `📝 How would you like to process this transcript?`,
+                        {
+                            parse_mode: 'HTML',
+                            reply_markup: keyboard
+                        }
+                    );
+                }
+            } catch (fileError) {
+                console.error(`[${methodName}] Error sending transcript as file for ${fileName}:`, fileError);
+
+                // If file sending fails, fall back to a message about processing the content
+                await adapter.reply(
+                    `⚠️ Successfully transcribed \`${fileName}\`, but unable to send the full transcript as a file. ` +
+                    "You can still process the transcript using the pattern menu below.",
+                    { parse_mode: 'Markdown' }
+                );
+
+                // Still show the pattern menu
+                if (this.menuManager) {
+                    const keyboard = this.menuManager.createPatternSelectionMenu(
+                        processedFilePatternSuggestion,
+                        processedFilePatternSuggestion.alternativePatterns
+                    ).reply_markup;
+
+                    await adapter.reply(
+                        `📝 How would you like to process this transcript?`,
+                        {
+                            parse_mode: 'HTML',
+                            reply_markup: keyboard
+                        }
+                    );
+                }
+            } finally {
+                 // Clean up cached args AND files for this message regardless of file sending success/failure
+                 this.conversationManager!.cache.del(argsCacheKey);
+                 this.conversationManager!.cache.del(filesCacheKey);
+                 // Delete the original processing status message
+                 if (messageId) {
+                    try { await adapter.deleteMessage(messageId); } catch(e) { /* ignore */ }
+                 }
+            }
+        } catch (error) {
+            console.error(`[${methodName}] Error during transcription process for ${fileName}:`, error);
+            const finalErrorMessage = `❌ Error processing \`${fileName}\`: ${error.message}`;
+            try {
+                 // Ensure messageId is passed correctly
+                 const editOptions: ExtraEditMessageText = { parse_mode: 'Markdown' };
+                 await adapter.editMessageText(finalErrorMessage, typeof messageId === 'number' ? messageId : editOptions);
+            } catch (e) {
+                await adapter.reply(finalErrorMessage); // Fallback reply
+            }
+            // Clean up cached args AND files even on error
+            this.conversationManager!.cache.del(argsCacheKey);
+            this.conversationManager!.cache.del(filesCacheKey);
+        }
     }
+
+
+    
+    
 
 }

@@ -1,5 +1,4 @@
-// ConversationManager.ts
-
+import axios from 'axios';
 import { ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts';
 import { BaseRetriever } from '@langchain/core/retrievers';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -17,7 +16,7 @@ import {
     logChatHistory
 } from './loggingUtility';
 import * as commandModules from './commands';
-import { IExtendedMemory, ExtendedIMessage, InteractionType, Command, ContextRequirement, EnhancedResponse, SourceCitation, ScoredDocument, MessageContext, DocumentMetadata, IStorage, SessionData, SessionInfo, createInitialGameState } from './commands/types'
+import { IExtendedMemory, ExtendedIMessage, InteractionType, Command, ContextRequirement, EnhancedResponse, SourceCitation, ScoredDocument, MessageContext, DocumentMetadata, IStorage, SessionData, SessionInfo, createInitialGameState, ZepFact, ZepMessage, ZepSummary, ZepMemoryResponse } from './commands/types'
 import NodeCache from 'node-cache';
 import { Tool } from '@langchain/core/tools';
 import PromptManager from './PromptManager';
@@ -310,7 +309,10 @@ export class ConversationManager {
             });
 
             try {
-                await this.memory.addChatMessages(formattedMessages, combinedId);
+                // Pass sessionId and userId separately as overrides
+                // Call the standard addChatMessages with overrides
+                // Call the standard addChatMessages with overrides
+                await this.memory.addChatMessages(formattedMessages, sessionId, userId);
                 console.log(`Messages added to memory for user ${userId} in session ${sessionId}`);
             } catch (error) {
                 console.error(`Error adding messages to memory for user ${userId} in session ${sessionId}:`, error);
@@ -587,7 +589,11 @@ export class ConversationManager {
         const { userId, sessionId } = await this.getSessionInfo(context);
         if (this.memory) {
             try {
-                const messages = await this.memory.getChatMessagesExtended(userId, sessionId);
+                // Call the extended method, passing sessionId first, then userId as override
+                // Call extended method: (userId, sessionId, returnBaseMessages?, prependMessages?, overrideUserId?)
+                // Call extended method, passing userId as the overrideUserId (5th argument)
+                // Call extended method, passing userId as the overrideUserId (5th argument)
+                const messages = await this.memory.getChatMessagesExtended(userId, sessionId, false, undefined, userId);
                 return messages.map((msg: any) => {
                     if (typeof msg === 'object' && msg !== null) {
                         if ('message' in msg && 'type' in msg) {
@@ -628,7 +634,8 @@ export class ConversationManager {
         const context = adapter.getMessageContext();
         const { userId, sessionId } = await this.getSessionInfo(context); if (this.memory) {
             try {
-                await this.memory.clearChatMessagesExtended(userId, sessionId);
+                // Call the standard clearChatMessages, only sessionId is needed
+                await this.memory.clearChatMessages(sessionId);
                 console.log(`Cleared memory for user ${userId} in session ${sessionId}`);
             } catch (error) {
                 console.error(`Error clearing memory for user ${userId} in session ${sessionId}:`, error);
@@ -743,12 +750,19 @@ export class ConversationManager {
         console.log('generateResponse called, promptManager exists:', !!this.promptManager);
         const methodName = 'generateResponse';
         console.log(`[${methodName}] Starting response generation for input: "${userInput}", isReply: ${isReply}`);
-        console.log(`[${methodName}] replyToMessage:`, replyToMessage);
 
-        try {
-            if (!this.promptManager) {
-                throw new Error('PromptManager is not initialized');
-            }
+        // Determine interaction type and standalone question early
+        // Declarations moved inside the try block below
+        console.log(`[${methodName}] replyToMessage:`, replyToMessage);
+try {
+    // Determine interaction type and standalone question early inside the try block
+    const interactionType = await this.determineInteractionType(userInput, userId);
+    let standaloneQuestion = userInput; // Initialize with userInput, use let
+    console.log(`[${methodName}] Initial interaction type: ${interactionType}`);
+
+    if (!this.promptManager) {
+        throw new Error('PromptManager is not initialized');
+    }
 
             const gameAgent = this.agentManager.getAgent('game') as GameAgent;
             const gameState = gameAgent?.getGameState?.(userId);
@@ -796,7 +810,7 @@ export class ConversationManager {
                 ];
             }
             console.log(`[${methodName}] About to determine interaction type`);
-            const interactionType = await this.determineInteractionType(userInput, userId);
+            // Remove redundant declaration, use the one from line 762
             console.log(`[${methodName}] Determined interaction type: ${interactionType}`);
 
 
@@ -971,13 +985,16 @@ export class ConversationManager {
             console.log(`[${methodName}] Truncated chat history to ${truncatedHistory.length} messages`);
 
             const prompt = this.promptManager.getContextAwarePrompt(contextRequirement, truncatedHistory);
-            let standaloneQuestion = userInput;
+            // Keep standaloneQuestion as userInput unless it's a RAG query
             let context = "";
 
             if (isRAGQuery && !gameState?.isActive) {
                 // this.ragQuestionCount++;
+                // Calculate the actual standalone question ONLY for RAG
                 standaloneQuestion = await this.getStandaloneQuestion(userInput, truncatedHistory, interactionType, adapter);
-                context = await this.getDynamicContext(standaloneQuestion, truncatedHistory, interactionType, userId, adapter, replyToMessage, progressKey);
+                // Pass the calculated standaloneQuestion
+                // Add the standaloneQuestion argument here
+                context = await this.getDynamicContext(standaloneQuestion, truncatedHistory, interactionType, userId, adapter, standaloneQuestion, replyToMessage, progressKey);
                 console.log(`[${methodName}] Standalone question: ${standaloneQuestion}`);
                 console.log(`[${methodName}] Retrieved context (preview): ${context.substring(0, 200)}...`);
             }
@@ -990,9 +1007,11 @@ export class ConversationManager {
                 console.log(`[${methodName}] Generating answer using ${contextRequirement} method`);
                 switch (contextRequirement) {
                     case 'rag':
+                        // Use the calculated standaloneQuestion for RAG answer generation
                         response = await this.generateAnswer(standaloneQuestion, context, truncatedHistory, interactionType, userId, adapter, replyToMessage, undefined, progressKey, thinkingPreferences);
                         if (!this.responseIncludesContext(response, context)) {
                             console.warn(`[${methodName}] Response does not include context, attempting to regenerate`);
+                            // Use the calculated standaloneQuestion for RAG regeneration
                             response = await this.regenerateWithExplicitContext(standaloneQuestion, context, truncatedHistory, prompt, interactionType);
                         }
                         /*
@@ -1041,6 +1060,7 @@ export class ConversationManager {
             }
 
             console.log(`[${methodName}] Generated response (preview): ${response.substring(0, 200)}...`);
+            // Use the potentially updated standaloneQuestion for tracking
             await this.promptManager.trackContextSuccess(context, standaloneQuestion, response);
 
             const responseChunks = this.promptManager.splitAndTruncateMessage(response);
@@ -1095,6 +1115,9 @@ export class ConversationManager {
     ): Promise<EnhancedResponse> {
         const methodName = 'processWithRAGAgent';
         console.log(`[${methodName}] CM: Entering processWithRAGAgent`);
+        // Calculate standaloneQuestion within this function's scope
+        const standaloneQuestion = await this.getStandaloneQuestion(input, chatHistory, interactionType, adapter);
+        console.log(`[${methodName}] Standalone question determined: "${standaloneQuestion}"`);
         const ragAgent = this.agentManager.getAgent('rag') as RAGAgent;
 
         // Cache keys
@@ -1116,14 +1139,16 @@ export class ConversationManager {
             // Cache miss or expired
             console.log(`[${methodName}] Cache miss or expired for relevantContext with key: "${contextCacheKey}"`);
             // Retrieve relevantContext using getRelevantContext
-            context = await this.getRelevantContext(input, chatHistory, interactionType, userId, adapter, replyToMessage, progressKey);
+            // Pass standaloneQuestion to direct call
+            context = await this.getRelevantContext(input, chatHistory, interactionType, userId, adapter, standaloneQuestion, replyToMessage, progressKey);
         }
 
         // Ensure context is a string
         if (typeof context !== 'string') {
             console.error(`[${methodName}] Retrieved context is not a string. Type: ${typeof context}`);
             // Handle the unexpected type, e.g., recompute the context
-            context = await this.getRelevantContext(input, chatHistory, interactionType, userId, adapter, replyToMessage, progressKey);
+            // Pass standaloneQuestion to direct call
+            context = await this.getRelevantContext(input, chatHistory, interactionType, userId, adapter, standaloneQuestion, replyToMessage, progressKey);
         }
 
         return await ragAgent.processQuery(input, context, chatHistory, interactionType, userId, adapter, progressKey);
@@ -1164,12 +1189,15 @@ export class ConversationManager {
         interactionType: InteractionType,
         userId: string,
         adapter: ContextAdapter,
+        standaloneQuestion: string, // Moved before optional params
         replyToMessage?: { message_id: number; text: string },
         progressKey?: string
     ): Promise<string> {
         const methodName = 'getDynamicContext';
+        // Remove internal calculation, use the passed parameter
+        console.log(`[${methodName}] Using passed standalone question: "${standaloneQuestion}"`);
 
-        // Use the cache key for relevant context
+        // Use the cache key for relevant context - TODO: Make this key specific?
         const contextCacheKey = CacheKeys.RelevantContext(userId);
 
         // Try to get the relevant context from cache
@@ -1187,14 +1215,18 @@ export class ConversationManager {
             // Cache miss or expired
             console.log(`[${methodName}] Cache miss or expired for key: "${contextCacheKey}"`);
             // Retrieve relevantContext using getRelevantContext
-            relevantContext = await this.getRelevantContext(question, chatHistory, interactionType, userId, adapter, replyToMessage, progressKey);
+            // Pass standaloneQuestion in the correct position
+            // Pass the received standaloneQuestion
+            // Pass the received standaloneQuestion
+            relevantContext = await this.getRelevantContext(question, chatHistory, interactionType, userId, adapter, standaloneQuestion, replyToMessage, progressKey);
         }
 
         // Ensure relevantContext is a string
         if (typeof relevantContext !== 'string') {
             console.error(`[${methodName}] Retrieved relevantContext is not a string. Type: ${typeof relevantContext}`);
             // Handle the unexpected type, e.g., recompute the context
-            relevantContext = await this.getRelevantContext(question, chatHistory, interactionType, userId, adapter, replyToMessage, progressKey);
+            // Pass standaloneQuestion in the correct position
+            relevantContext = await this.getRelevantContext(question, chatHistory, interactionType, userId, adapter, standaloneQuestion, replyToMessage, progressKey);
         }
 
         console.log(`[getDynamicContext] relevantContext from cache: ${relevantContext}`);
@@ -1244,11 +1276,8 @@ export class ConversationManager {
             console.log(`[${methodName}] Context will be used for response generation (${context.length} chars)`);
 
             // Explicitly save this context again with the user ID
-            const contextCacheKey = `relevant_context:${userId}`;
-            this.cache.set(contextCacheKey, {
-                relevantContext: context,
-                timestamp: Date.now()
-            }, 3600); // 1 hour
+            // Remove redundant caching of relevant context here.
+            // It's already cached correctly with a question-specific key in getRelevantContext.
         } else {
             console.warn(`[${methodName}] No context available for this response generation`);
         }
@@ -1260,23 +1289,32 @@ export class ConversationManager {
                 console.log(`[${methodName}] Progress updated for progressKey: ${progressKey}`);
             }
             let systemPrompt = this.promptManager.constructSystemPrompt(interactionType, contextRequirement);
-            const recentContextSummary = this.promptManager.generateRecentContextSummary(chatHistory);
+           // const recentContextSummary = this.promptManager.generateRecentContextSummary(chatHistory);
 
             // Use the cache key for contextualized query
-            const queryCacheKey = CacheKeys.ContextualizedQuery(userId);
+            // Use question-specific key for contextualized query cache
+            // Note: 'question' parameter here is the standaloneQuestion when called from RAG path
+            const queryCacheKey = CacheKeys.ContextualizedQuery(userId, question);
 
-            // Try to get the contextualized query from cache
+            // --- Retrieve and delete contextualized query from cache ---
             let contextualizedQuery: string | undefined = this.cache.get<string>(queryCacheKey);
 
-
-            if (!contextualizedQuery) {
-                // If not in cache, generate it and store in cache
-                contextualizedQuery = await this.constructContextualizedQuery(question, chatHistory, interactionType, adapter, replyToMessage);
-                this.cache.set(queryCacheKey, contextualizedQuery, 1800);
-                console.log(`[${methodName}] Stored contextualizedQuery in cache with key: "${queryCacheKey}".`);
+            if (contextualizedQuery) {
+                // Cache HIT: Use the cached query and delete it immediately
+                console.log(`[${methodName}] Cache HIT for contextualizedQuery with key: "${queryCacheKey}". Using cached value.`);
+                this.cache.del(queryCacheKey); // Delete after retrieval
+                console.log(`[${methodName}] Deleted cached contextualizedQuery with key: "${queryCacheKey}".`);
             } else {
-                console.log(`[${methodName}] Retrieved contextualizedQuery from cache with key: "${queryCacheKey}".`);
+                // Cache MISS: This shouldn't happen if getRelevantContext cached it. Log a warning.
+                // Fallback to using the original 'question' (standaloneQuestion) directly.
+                // DO NOT recompute/recache here.
+                
+                console.warn(`[${methodName}] Cache MISS for contextualizedQuery key: "${queryCacheKey}". Generating a contextualizedQuery.`);
+               // contextualizedQuery = question; // Fallback
+                contextualizedQuery = await this.constructContextualizedQuery(question, chatHistory, interactionType, adapter, replyToMessage);
+
             }
+            // --- End retrieval/deletion ---
 
           //  if (this.enablePersona) {
           //     systemPrompt = `${systemPrompt}\n\n${this.promptManager.getPersonaPrompt()}`;
@@ -1286,12 +1324,23 @@ export class ConversationManager {
                 await this.updateProgress(adapter, progressKey, "📚");
                 console.log(`[${methodName}] Progress updated for progressKey: ${progressKey}`);
             }
-            const userMessage = new HumanMessage(
-                this.promptManager.constructUserPrompt(contextualizedQuery, context, interactionType)
-            );
 
+            let finalContext = context; // Start with the base context
+
+            // Conditionally enhance context with facts if memory supports it
+            if (this.memory && typeof (this.memory as any).getChatFacts === 'function') {
+                logInfo(methodName, 'Memory supports facts, attempting enhancement.');
+                finalContext = await this.enhanceContextWithFacts(context, question, adapter);
+            } else {
+                logInfo(methodName, 'Memory does not support facts, skipping enhancement.');
+                // finalContext remains the original context
+            }
+
+            const userMessage = new HumanMessage(
+                this.promptManager.constructUserPrompt(contextualizedQuery, finalContext, interactionType)
+            );
             const messages: BaseMessage[] = [
-                new SystemMessage(`${systemPrompt}\n\n${recentContextSummary}`),
+                new SystemMessage(systemPrompt), // Remove recentContextSummary here
                 userMessage
             ];
 
@@ -2421,7 +2470,7 @@ export class ConversationManager {
 
         const systemMessage = new SystemMessage(systemPrompt);
         const userMessage = new HumanMessage(
-            `Question: ${question}\n\n` +
+            `User Question: ${question}\n\n` +
             `${type.charAt(0).toUpperCase() + type.slice(1)} to summarize:\n${text}\n\n` +
             `Please provide a summary of the above ${type}, focusing on the key points that are most relevant to the question while also capturing important context and details. ` +
             `The summary should aim to be informative, but try to keep it within ${targetLength} characters. Feel free to be flexible to ensure clarity and completeness.` +
@@ -2521,8 +2570,9 @@ export class ConversationManager {
         interactionType: InteractionType,
         userId: string,
         adapter: ContextAdapter,
+        standaloneQuestion: string, // Moved before optional params
         replyToMessage?: { message_id: number; text: string },
-        progressKey?: string,
+        progressKey?: string
     ): Promise<string> {
         const methodName = 'getRelevantContext';
         console.log(`[${methodName}] Starting for question: "${question}"`);
@@ -2535,96 +2585,92 @@ export class ConversationManager {
             return "";
         }
 
-        // Cache keys
-        const contextCacheKey = CacheKeys.RelevantContext(userId);
-        const queryCacheKey = CacheKeys.ContextualizedQuery(userId);
+        // Standalone question is now passed as a parameter
+        const standaloneQuestionForCache = standaloneQuestion; // Use the passed parameter
+
+        // Cache keys (now incorporating standaloneQuestion)
+        const contextCacheKey = CacheKeys.RelevantContext(userId, standaloneQuestionForCache);
+        const queryCacheKey = CacheKeys.ContextualizedQuery(userId, standaloneQuestionForCache);
 
         console.log(`[${methodName}] Context cache key: ${contextCacheKey}`);
         console.log(`[${methodName}] Query cache key: ${queryCacheKey}`);
 
-        // Try to get the relevant context from cache
-        const contextCacheEntry = this.cache.get<{ relevantContext: string; timestamp: number }>(contextCacheKey);
-        let relevantContext: string;
-
-        // Try to get the contextualized query from cache
-        let contextualizedQuery: string | undefined = this.cache.get<string>(queryCacheKey);
-
-        const currentTime = Date.now();
-        const cacheDuration = 60 * 60 * 1000; // 60 minutes in milliseconds
-
-        // Check if relevantContext is in cache and valid
-        if (contextCacheEntry) {
-            // Log age for debugging
-            console.log(`[${methodName}] Cache hit for relevant context. Age: ${(currentTime - contextCacheEntry.timestamp) / 1000} seconds`);
-
-            // Important: Don't apply timing logic here - if we have the entry, use it
-            // The NodeCache TTL system will automatically handle expiration
-            relevantContext = contextCacheEntry.relevantContext;
-        } else {
-            console.log(`[${methodName}] Cache miss or expired for relevant context. Computing new context.`);
-
-            // Compute the contextualized query if not already cached
-            if (!contextualizedQuery) {
-                console.log(`[${methodName}] Constructing new contextualized query.`);
-                contextualizedQuery = await this.constructContextualizedQuery(question, chatHistory, interactionType, adapter, replyToMessage, progressKey,);
-                this.cache.set(queryCacheKey, contextualizedQuery, cacheDuration);
-                console.log(`[${methodName}] New contextualized query stored in cache.`);
-            } else {
-                console.log(`[${methodName}] Using cached contextualized query.`);
-            }
-
-            console.log(`[${methodName}] Contextualized query: ${contextualizedQuery}`);
-
-            if (this.retriever instanceof CustomRetriever) {
-                // Set the adapter and progressKey for this retrieval operation
-                this.retriever.setRetrievalContext(this.flowId, adapter, progressKey);
-            }
-            // Use the contextualized query for retrieval
-            console.log(`[${methodName}] Invoking retriever with contextualized query.`);
-            const docs = await this.retriever.invoke(contextualizedQuery);
-            console.log(`[${methodName}] Retrieved ${docs.length} documents`);
-
-            if (docs.length === 0) {
-                console.log(`[${methodName}] No documents retrieved. Returning empty context.`);
-                relevantContext = "";
-                this.cache.set(contextCacheKey, { relevantContext, timestamp: currentTime }, 1800);
-                return relevantContext;
-            }
-
-            console.log(`[${methodName}] Scoring and filtering documents.`);
-            const scoredDocs = docs.map(doc => {
-                const relevanceScore = this.calculateRelevanceScore(doc.metadata.score ?? 0);
-                const vectorStoreScore = doc.metadata.score ?? 0;
-                const combinedScore = (relevanceScore * 0.1) + (vectorStoreScore * 0.9);
-                return { content: doc.pageContent, score: combinedScore, metadata: doc.metadata };
-            });
-
-            const relevantDocs = scoredDocs.filter(doc => doc.score >= this.relevanceScoreThreshold);
-            const sortedDocs = relevantDocs.sort((a, b) => b.score - a.score);
-            const topDocs = sortedDocs.slice(0, this.topRelevantDocs);
-
-            console.log(`[${methodName}] Relevant documents: ${relevantDocs.length}, Top documents: ${topDocs.length}`);
-
-            if (topDocs.length === 0) {
-                console.log(`[${methodName}] No documents met the relevance threshold. Returning empty context.`);
-                relevantContext = "";
-                this.cache.set(contextCacheKey, { relevantContext, timestamp: currentTime }, 1800);
-                return relevantContext;
-            }
-
-            console.log(`[${methodName}] Top document scores:`, topDocs.map(doc => ({
-                score: doc.score,
-                preview: doc.content.substring(0, 50) + '...'
-            })));
-
-            relevantContext = this.formatRelevantContext(topDocs);
-            this.cache.set(contextCacheKey, { relevantContext, timestamp: currentTime }, 1800);
-            console.log(`[${methodName}] New relevant context stored in cache.`);
-        }
-
+        
+                // 1. Always compute the contextualized query for the current input question
+                console.log(`[${methodName}] Constructing query for current input: "${question}"`);
+                const contextualizedQuery = await this.constructContextualizedQuery(question, chatHistory, interactionType, adapter, replyToMessage, progressKey);
+                console.log(`[${methodName}] Constructed query: "${contextualizedQuery.substring(0, 100)}..."`);
+                // Cache the computed query with a short TTL (e.g., 300 seconds = 5 minutes)
+                this.cache.set(queryCacheKey, contextualizedQuery, 300);
+                console.log(`[${methodName}] Stored contextualizedQuery in cache with key: ${queryCacheKey}`);
+        
+                // 2. Check the context cache
+                const contextCacheEntry = this.cache.get<{ relevantContext: string; timestamp: number }>(contextCacheKey);
+                let relevantContext: string | undefined;
+                const currentTime = Date.now();
+                const contextCacheDuration = 60 * 60 * 1000; // 1 hour TTL for context
+                const isContextCacheValid = contextCacheEntry && (currentTime - contextCacheEntry.timestamp) < contextCacheDuration;
+        
+                if (isContextCacheValid) {
+                    // Cache hit for context
+                    console.log(`[${methodName}] Cache hit for relevant context. Age: ${(currentTime - contextCacheEntry.timestamp) / 1000} seconds`);
+                    relevantContext = contextCacheEntry.relevantContext;
+                } else {
+                    // Cache miss or expired for context
+                    console.log(`[${methodName}] Cache miss or expired for relevant context. Retrieving new context using current query.`);
+        
+                    // Retrieve documents using the NEW query computed above
+                    if (this.retriever instanceof CustomRetriever) {
+                        this.retriever.setRetrievalContext(this.flowId, adapter, progressKey);
+                    }
+                    console.log(`[${methodName}] Invoking retriever with current contextualized query.`);
+                    const docs = await this.retriever.invoke(contextualizedQuery); // Use the just-computed query
+                    console.log(`[${methodName}] Retrieved ${docs.length} documents`);
+        
+                    if (docs.length === 0) {
+                        console.log(`[${methodName}] No documents retrieved. Setting empty context.`);
+                        relevantContext = "";
+                    } else {
+                        console.log(`[${methodName}] Scoring and filtering documents.`);
+                        const scoredDocs = docs.map(doc => {
+                            const relevanceScore = this.calculateRelevanceScore(doc.metadata.score ?? 0);
+                            const vectorStoreScore = doc.metadata.score ?? 0;
+                            const combinedScore = (relevanceScore * 0.1) + (vectorStoreScore * 0.9);
+                            return { content: doc.pageContent, score: combinedScore, metadata: doc.metadata };
+                        });
+        
+                        const relevantDocs = scoredDocs.filter(doc => doc.score >= this.relevanceScoreThreshold);
+                        const sortedDocs = relevantDocs.sort((a, b) => b.score - a.score);
+                        const topDocs = sortedDocs.slice(0, this.topRelevantDocs);
+        
+                        console.log(`[${methodName}] Relevant documents: ${relevantDocs.length}, Top documents: ${topDocs.length}`);
+        
+                        if (topDocs.length === 0) {
+                            console.log(`[${methodName}] No documents met the relevance threshold. Setting empty context.`);
+                            relevantContext = "";
+                        } else {
+                            console.log(`[${methodName}] Top document scores:`, topDocs.map(doc => ({
+                                score: doc.score,
+                                preview: doc.content.substring(0, 50) + '...'
+                            })));
+                            relevantContext = this.formatRelevantContext(topDocs);
+                        }
+                    }
+        
+                    // Store the newly computed context
+                    this.cache.set(contextCacheKey, { relevantContext, timestamp: currentTime }, contextCacheDuration); // Use longer TTL for context
+                    console.log(`[${methodName}] New relevant context stored in cache.`);
+                }
+        
+                // Ensure relevantContext is defined before returning
+                if (relevantContext === undefined) {
+                    console.warn(`[${methodName}] relevantContext is undefined at the end. Returning empty string.`);
+                    relevantContext = "";
+                }
         console.log(`[${methodName}] Relevant context length: ${relevantContext.length} characters`);
         console.log(`[${methodName}] Relevant context preview: ${relevantContext.substring(0, 100)}...`);
 
+        // Reverted: Fact enhancement moved to generateAnswer for better separation of concerns.
         return relevantContext;
     }
 
@@ -2682,13 +2728,16 @@ export class ConversationManager {
         let contextualizedQuery = question;
         let contextParts: string[] = [];
 
+        // Removed redundant fact enhancement call here. Facts are now added in generateAnswer.
+
         // Add recent chat history context
-        const recentHistory = this.getRecentRelevantHistory(chatHistory, 5); // Get last 5 messages
+        const recentHistory = this.getRecentRelevantHistory(chatHistory, 6); // Get last 6 messages
         console.log(`[${methodName}] Recent history messages: ${recentHistory.length}`);
+        let historySummary = '';
         if (recentHistory.length > 0) {
             console.log(`[${methodName}] Summarizing chat history`);
-            const historySummary = await this.summarizeHistory(recentHistory, question, 4000, interactionType, adapter);
-            contextParts.push(`Recent conversation: ${historySummary}`);
+            historySummary = await this.summarizeHistory(recentHistory, question, 4000, interactionType, adapter);
+            historySummary = `Recent conversation summary:\n${historySummary}\n\n`;
         } else {
             console.log(`[${methodName}] No recent history to add to context`);
         }
@@ -2697,15 +2746,17 @@ export class ConversationManager {
         if (replyToMessage && (!recentHistory.length || recentHistory[recentHistory.length - 1].content !== replyToMessage.text)) {
             console.log(`[${methodName}] Processing reply context`);
             const summarizedReply = await this.summarizeText(replyToMessage.text, question, 4000, 'context', interactionType, adapter);
-            contextParts.push(`Replied to: ${summarizedReply}`);
+            contextParts.push(`Replied to:\n${summarizedReply}`);
         }
 
+        let contextPrefix = historySummary;
         if (contextParts.length > 0) {
-            contextualizedQuery = `Context:\n${contextParts.join('\n')}\n\nQuestion: ${question}`;
-            console.log(`[${methodName}] Final contextualized query: ${contextualizedQuery}`);
-        } else {
-            console.log(`[${methodName}] No additional context added to the query`);
+            const additionalContext = contextParts.join('\n\n');
+            contextPrefix += `Additional context:\n${additionalContext}\n\n`;
         }
+
+        contextualizedQuery = `${contextPrefix}User Question: ${question}`;
+        console.log(`[${methodName}] Final contextualized query: ${contextualizedQuery.substring(0, 200)}...`);
 
         return contextualizedQuery;
     }
@@ -3755,5 +3806,185 @@ export class ConversationManager {
 
         return { interactionType, contextRequirement };
     }
+
+    // In ConversationManager.ts
+
+/**
+ * Retrieves facts from the knowledge graph that are relevant to the current conversation
+ */
+public async getRelevantFacts(
+    adapter: ContextAdapter,
+    question: string
+): Promise<ZepFact[]> {
+    const methodName = 'getRelevantFacts';
+    const context = adapter.getMessageContext();
+    const { userId, sessionId } = await this.getSessionInfo(context);
+
+    let graphitiFacts: ZepFact[] = [];
+    let memoryFacts: ZepFact[] = [];
+
+    // 1. Get facts from Graphiti API (/search)
+    try {
+        const payload = {
+            query: question,
+            session_id: sessionId,
+            user_id: userId // Include session/user context if potentially useful for search
+        };
+        logInfo(methodName, `Searching facts via Graphiti API for query: "${question}" with payload:`, payload);
+        const response = await axios.post('http://localhost:8003/search', payload);
+        if (response.data && Array.isArray(response.data.facts)) {
+            logInfo(methodName, `Received ${response.data.facts.length} facts from Graphiti service.`);
+            graphitiFacts = response.data.facts;
+        } else {
+            logWarn(methodName, 'Received unexpected response format from Graphiti service:', response.data);
+        }
+    } catch (error) {
+        logError(methodName, 'Error retrieving facts from Graphiti API:', error as Error);
+        // Continue even if Graphiti fails, might get facts from memory
+    }
+
+    // 2. Get facts from Zep Memory object
+    if (this.memory && typeof (this.memory as any).getChatFacts === 'function') {
+        try {
+            logInfo(methodName, `Attempting to retrieve Zep facts from memory object for session: ${sessionId}`);
+            const factsFromMemory: ZepFact[] = await (this.memory as any).getChatFacts(sessionId);
+            if (factsFromMemory && factsFromMemory.length > 0) {
+                logInfo(methodName, `Received ${factsFromMemory.length} facts from memory object.`);
+                memoryFacts = factsFromMemory;
+            } else {
+                logInfo(methodName, 'No Zep facts returned from memory object.');
+            }
+        } catch (factError) {
+            logError(methodName, 'Error retrieving Zep facts from memory object:', factError as Error);
+            // Continue even if memory retrieval fails
+        }
+    } else {
+        logWarn(methodName, 'Memory object or getChatFacts method not available.');
+    }
+
+    // 3. Combine and de-duplicate facts
+    const combinedFacts = [...graphitiFacts, ...memoryFacts];
+    const uniqueFactsMap = new Map<string, ZepFact>();
+    combinedFacts.forEach(fact => {
+        if (fact && fact.uuid && !uniqueFactsMap.has(fact.uuid)) {
+            uniqueFactsMap.set(fact.uuid, fact);
+        }
+    });
+
+    const uniqueFacts = Array.from(uniqueFactsMap.values());
+    logInfo(methodName, `Returning ${uniqueFacts.length} unique facts after combining sources.`);
+
+    return uniqueFacts;
+}
+
+/**
+ * Retrieves conversation summary from the knowledge graph
+ */
+public async getConversationSummary(
+    adapter: ContextAdapter
+): Promise<ZepSummary | null> {
+    const methodName = 'getConversationSummary';
+    const context = adapter.getMessageContext();
+    const { userId, sessionId } = await this.getSessionInfo(context);
+    
+    if (!this.memory || typeof (this.memory as any).getSessionSummary !== 'function') {
+        logWarn(methodName, 'Memory doesn\'t support summary retrieval');
+        return null;
+    }
+    
+    try {
+        logInfo(methodName, `Retrieving conversation summary for session: ${sessionId}`);
+        return await (this.memory as any).getSessionSummary(userId, sessionId);
+    } catch (error) {
+        logError(methodName, 'Error retrieving conversation summary:', error as Error);
+        return null;
+    }
+}
+
+/**
+ * Enhances context with relevant facts from the knowledge graph
+ */
+public async enhanceContextWithFacts(
+    context: string,
+    question: string,
+    adapter: ContextAdapter
+): Promise<string> {
+    const methodName = 'enhanceContextWithFacts';
+    
+    try {
+        const facts = await this.getRelevantFacts(adapter, question);
+        if (!facts || facts.length === 0) {
+            logInfo(methodName, 'No relevant facts found to enhance context');
+            return context;
+        }
+        
+        // Format facts as additional context - Assuming Graphiti /search returns relevant facts directly
+        const factsContext = facts
+            .map(fact =>
+                `- Fact: ${fact.fact || fact.content}` // Changed prefix for clarity
+            ).join("\n"); // Changed separator to newline for list format
+        
+        if (!factsContext) {
+            return context; // No facts found or formatted
+        }
+        
+        logInfo(methodName, `Formatted ${facts.length} potential facts for model consideration`);
+        // Updated header to guide the model on relevance assessment
+        return `${context}\n\nConsider the following potentially relevant facts extracted from the users knowledge graph. Use them only if they directly help answer the user's question:\n${factsContext}`;
+    } catch (error) {
+        logError(methodName, 'Error enhancing context with facts:', error as Error);
+        return context;
+    }
+}
+
+/**
+ * Enhances context with conversation summary
+ */
+public async enhanceContextWithSummary(
+    context: string,
+    adapter: ContextAdapter
+): Promise<string> {
+    const methodName = 'enhanceContextWithSummary';
+    
+    try {
+        const summary = await this.getConversationSummary(adapter);
+        if (!summary || !summary.content) {
+            logInfo(methodName, 'No conversation summary available');
+            return context;
+        }
+        
+        logInfo(methodName, `Enhanced context with conversation summary (${summary.content.length} chars)`);
+        return `${context}\n\n--- Conversation Summary ---\n${summary.content}`;
+    } catch (error) {
+        logError(methodName, 'Error enhancing context with summary:', error as Error);
+        return context;
+    }
+}
+
+/**
+ * Searches for related facts across all user sessions
+ */
+public async searchAcrossSessions(
+    query: string,
+    adapter: ContextAdapter,
+    limit: number = 5
+): Promise<ZepFact[]> {
+    const methodName = 'searchAcrossSessions';
+    const context = adapter.getMessageContext();
+    const { userId } = await this.getSessionInfo(context);
+    
+    if (!this.memory || typeof (this.memory as any).searchKnowledgeGraph !== 'function') {
+        logWarn(methodName, 'Memory doesn\'t support knowledge graph search');
+        return [];
+    }
+    
+    try {
+        logInfo(methodName, `Searching across sessions for: "${query}"`);
+        return await (this.memory as any).searchKnowledgeGraph(query, userId, limit);
+    } catch (error) {
+        logError(methodName, 'Error searching across sessions:', error as Error);
+        return [];
+    }
+}
 }
 //export const splitAndTruncateMessage = ConversationManager.splitAndTruncateMessage;

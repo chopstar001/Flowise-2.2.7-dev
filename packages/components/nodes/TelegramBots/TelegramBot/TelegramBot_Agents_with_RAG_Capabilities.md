@@ -623,3 +623,37 @@ These updates reflect the significant progress made in implementing and integrat
 ### Note for Developers:
 
 When working with memory-related functionality, be aware of this dual approach. Always prefer the newer, more granular methods for new implementations. If you encounter methods using `overrideSessionId`, consider updating them to use the 'Extended' versions if appropriate.
+
+
+/**
+ * Zep Knowledge Graph Integration
+ * 
+ * This implementation enhances our RAG capabilities by leveraging Zep's knowledge graph,
+ * providing cross-session memory, facts extraction, and conversation summaries.
+ * 
+ * Benefits:
+ * - Access to auto-generated summaries of conversations
+ * - Extraction of facts from conversations
+ * - Cross-session knowledge retrieval
+ * - Enhanced context for RAG responses
+ * 
+ * Usage:
+ * 
+ * 1. Ensure you're using ZepMemory in your Flowise flow
+ * 2. The TelegramBot_Agents will automatically detect and adapt the Zep memory
+ * 3. The RAG pipeline will be enhanced with knowledge graph features
+ * 4. Use the /zepknowledge command to test the features
+ * 
+ * Examples:
+ * 
+ * - Conversation summaries are automatically added to context for RAG responses
+ * - Facts from the current conversation are included in context
+ * - When asking questions similar to previous conversations, relevant facts
+ *   from those conversations will be included
+ * 
+ * Limitations:
+ * 
+ * - Requires Zep memory to be properly configured in Flowise
+ * - Cross-session search works best when user IDs are consistent
+ * - Works with the Zep Community Edition server or Zep Cloud
+ */
