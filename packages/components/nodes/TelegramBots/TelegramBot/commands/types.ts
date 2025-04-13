@@ -170,7 +170,7 @@ export interface ExtendedIMessage extends Omit<FlowiseIMessage, 'message'> {
     type: MessageType;
     input?: MessageContent,
     output?: MessageContent,
-    additional_kwargs?: { message_id?: number };
+    additional_kwargs?: Record<string, any>; // Make kwargs more flexible
     metadata?: {
         userId?: string;
         sessionId?: string;
@@ -1047,6 +1047,12 @@ export interface ZepFact {
           prependMessages?: ExtendedIMessage[],
           overrideUserId?: string // Add the missing overrideUserId parameter
       ): Promise<BaseMessage[] | ExtendedIMessage[]>;
+     // Add the missing method signature
+     addChatMessagesExtended(
+         msgArray: ExtendedIMessage[],
+         userId: string,
+         sessionId: string
+     ): Promise<void>;
       // Redefine addChatMessages to accept overrides, matching StandaloneZepMemory implementation
       addChatMessages(
           msgArray: { text: string; type: MessageType }[],

@@ -435,17 +435,7 @@ export class FileManager {
                 stream.on('finish', () => resolve());
                 doc.pipe(stream);
     
-                // Store information for page numbering
-                const pageInfo = {
-                    count: 0,
-                    handlePageAdded: () => {
-                        pageInfo.count++;
-                    }
-                };
-    
-                // Register event handler for new pages
-                doc.on('pageAdded', pageInfo.handlePageAdded);
-    
+                // Page numbering will be done after content addition using doc.pages.length
                 // Add a simple header/title page
                 this.addSimplePDFHeader(doc, title);
     
@@ -469,28 +459,35 @@ export class FileManager {
                 // Process and add formatted content
                 this.addSimpleFormattedContent(doc, sections);
     
-                // Remove event handler to avoid triggering during page numbering
-                doc.removeListener('pageAdded', pageInfo.handlePageAdded);
-    
                 // Prepare for page numbering
-                const totalPages = pageInfo.count + 1; // Add 1 for the page we're currently on
+                // Get total pages directly from the document's internal state
+                const totalPages = doc.bufferedPageRange().count;
     
-                // Add page numbers to each page
+                // Add page numbers to each page - FIX: Start with index 0 but use i+1 for page number
                 for (let i = 0; i < totalPages; i++) {
-                    doc.switchToPage(i);
+                    // PDFKit pages are 1-indexed
+                    const pageIndex = i;
                     
-                    // Define footer position and text
-                    const pageNumberText = `Page ${i + 1} of ${totalPages}`;
-                    const footerY = doc.page.height - 50;
-                    const footerX = doc.page.margins.left;
-                    const footerWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-                    
-                    // Add the page number
-                    doc.fontSize(10)
-                       .text(pageNumberText, footerX, footerY, {
-                           width: footerWidth,
-                           align: 'center'
-                       });
+                    try {
+                        // This is the fix - use i+1 instead of i for page switching
+                        doc.switchToPage(pageIndex);
+                        
+                        // Define footer position and text
+                        const pageNumberText = `Page ${pageIndex + 1} of ${totalPages}`;
+                        const footerY = doc.page.height - 50;
+                        const footerX = doc.page.margins.left;
+                        const footerWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+                        
+                        // Add the page number
+                        doc.fontSize(10)
+                           .text(pageNumberText, footerX, footerY, {
+                               width: footerWidth,
+                               align: 'center'
+                           });
+                    } catch (pageError) {
+                        console.warn(`Unable to add page number to page ${pageIndex + 1}:`, pageError.message);
+                        // Continue with next page instead of failing the entire process
+                    }
                 }
     
                 // Finalize PDF

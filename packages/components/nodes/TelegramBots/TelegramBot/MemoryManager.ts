@@ -16,6 +16,11 @@ export class MemoryManager extends FlowiseMemory implements IExtendedMemory {
     }
 
     getStorageKey(userId: string, sessionId: string): string {
+        // If userId is the specific placeholder "GROUP", use only sessionId (chatId) as the key
+        if (userId === "GROUP") {
+            return sessionId; // Use chatId directly as the key
+        }
+        // Otherwise, use the combined format for user-specific sessions
         return `user_${userId}_session_${sessionId}`;
     }
 
@@ -100,21 +105,22 @@ export class MemoryManager extends FlowiseMemory implements IExtendedMemory {
         const key = this.getStorageKey(userId, sessionId);
         console.log(`[MemoryManager] Retrieving messages for key: ${key}`);
         console.log(`[MemoryManager] All keys in storage: ${Array.from(this.storage.keys())}`);
-
+    
         const messages = this.storage.get(key) || [];
         console.log(`[MemoryManager] Retrieved ${messages.length} messages for key ${key}`);
-
+    
         if (messages.length > 0) {
             console.log(`[MemoryManager] First message: ${JSON.stringify(messages[0])}`);
             console.log(`[MemoryManager] Last message: ${JSON.stringify(messages[messages.length - 1])}`);
         } else {
             console.log(`[MemoryManager] No messages found for key ${key}`);
         }
-
+    
         if (returnBaseMessages) {
+            // Use arrow functions to preserve the 'this' context
             const baseMessages: BaseMessage[] = [
-                ...prependMessages.map(this.convertToBaseMessage),
-                ...messages.map(this.convertToBaseMessage)
+                ...prependMessages.map(msg => this.convertToBaseMessage(msg)),
+                ...messages.map(msg => this.convertToBaseMessage(msg))
             ];
             return baseMessages;
         }

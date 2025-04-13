@@ -150,7 +150,8 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
     private idleTimeout: number;
     private adminIds: number[] = [];
     private userLastActivity: Map<number, number> = new Map();
-    private memory: IExtendedMemory | null = null;
+    private memory: IExtendedMemory | null = null; // User-specific memory
+    private memoryGroup: IExtendedMemory | null = null; // Group-specific memory
     public bot: Telegraf<Context<Update>> | null = null;
     private agentManager: AgentManager;
     private collaboratingAgents: TelegramBot_Agents[] = [];
@@ -221,6 +222,21 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         console.log(`[getTranscriptionService] Returning this.transcriptionService:`, !!this.transcriptionService);
         // --> END LOGGING <--
         return this.transcriptionService;
+    }
+
+    // Add getter for group memory
+    public getGroupMemory(): IExtendedMemory | null {
+        return this.memoryGroup;
+    }
+
+    // Add getter for summation model
+    public getSummationModel(): BaseChatModel | null {
+        return this.summationModel;
+    }
+
+    // Add getter for chat model
+    public getChatModel(): BaseChatModel | null {
+        return this.chatModel;
     }
 
     constructor(flowId?: string) {
@@ -669,6 +685,10 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             console.log("Memory type:", this.memory.getMemoryType());
             console.log("Initialized memory:", this.memory.constructor.name);
             console.log(this.memory ? "Using provided memory solution." : "No memory solution provided. Using default or none.");
+
+            // Initialize the separate memory manager for group chats
+            this.memoryGroup = new MemoryManager();
+            console.log("Initialized group memory manager:", this.memoryGroup.constructor.name);
             this.promptManager = new PromptManager(
                 nodeData.inputs?.ragSystemPrompt as string || PromptManager.defaultRAGSystemPrompt(),
                 nodeData.inputs?.generalSystemPrompt as string || PromptManager.defaultGeneralSystemPrompt(),
@@ -3356,9 +3376,62 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             return "Error: Bot username is undefined";
         }
 
-        // Ignore messages from other bots
-        if (message.from?.is_bot && message.from.username !== botUsername) {
-            return "Not our bot. Ignore";
+        // Ignore messages from other bots (except potentially for logging below)
+        const isFromOtherBot = message.from?.is_bot && message.from.username !== botUsername;
+        // We might still want to log messages from other bots to the group history
+
+        // --- START: Log ALL Group Text Messages to memoryGroup ---
+        // Declare chatType and isGroup once, early
+        const chatType = context.raw.chat?.type;
+        const isGroup = chatType === 'group' || chatType === 'supergroup';
+        let originalText: string | undefined;
+
+        if ('text' in message && message.text) {
+            originalText = message.text; // Capture original text
+        }
+
+        if (isGroup && originalText && this.memoryGroup) {
+            // Log any text message in a group to the group memory, including from other bots if desired
+            // For now, let's log messages from humans and this bot's instance if needed later
+            if (!isFromOtherBot || message.from?.id === this.botId) { // Log human messages and own messages
+                 try {
+                    const groupSessionId = context.chatId.toString();
+                    const senderUserId = context.userId.toString(); // Actual sender
+                    const messageTimestamp = message.date ? new Date(message.date * 1000).toISOString() : new Date().toISOString(); // Handle potentially undefined date
+
+                    // Create a BaseMessage (specifically HumanMessage for user inputs)
+                    const groupBaseMessage = new HumanMessage({
+                         content: originalText,
+                         additional_kwargs: {
+                             message_id: message.message_id,
+                             senderUserId: senderUserId,
+                             timestamp: messageTimestamp,
+                             // Add sender's first name if available
+                             senderFirstName: message.from?.first_name
+                         }
+                     });
+
+                    // Convert to the format expected by addChatMessages
+                    // Ensure this format matches what addChatMessages expects
+                    const groupExtendedMessage = [{
+                         text: originalText,
+                         type: 'userMessage' as MessageType, // Log as user message
+                         additional_kwargs: groupBaseMessage.additional_kwargs
+                    }];
+
+
+                    await this.memoryGroup.addChatMessages(groupExtendedMessage, groupSessionId, senderUserId);
+                    logInfo(methodName, `Logged message to group memory`, { chatId: groupSessionId, senderUserId: senderUserId });
+                 } catch (groupLogError) {
+                    logError(methodName, 'Failed to log message to group memory', groupLogError as Error, { chatId: context.chatId });
+                 }
+            }
+        }
+        // --- END: Log ALL Group Text Messages ---
+
+        // Now, proceed with the original logic for ignoring other bots if needed for *processing*
+        if (isFromOtherBot) {
+             return "Not our bot. Ignore processing."; // Return after potentially logging
         }
 
         console.log("Received message:", JSON.stringify(message, null, 2));
@@ -3375,16 +3448,16 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         if (ragAgent) {
             ragAgent.refreshUserActivity(userId);
         }
-        const chatType = context.raw.chat.type;
+        // Use the already declared chatType and isGroup
         const isPrivateChat = chatType === 'private';
-        const isGroup = chatType === 'group' || chatType === 'supergroup';
+        // isGroup is already declared above
 
-        let text: string = context.input;
+        // Use the potentially captured originalText, or get it from context if not captured above
+        let text: string = originalText || context.input;
         let isCaption = false;
-
-        if ('caption' in message && message.caption) {
-            text = message.caption;
-            isCaption = true;
+        if (!originalText && 'caption' in message && message.caption) {
+             text = message.caption;
+             isCaption = true;
         }
 
         // Handle question selection
@@ -5522,14 +5595,78 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
 
             // Add messages to memory
             // Use addChatMessages with overrides instead of the removed addChatMessagesExtended
+            // --- Update User-Specific Memory (Existing Logic) ---
             await this.memory.addChatMessages(extendedMessages, sessionId, userId);
+            logDebug(methodName, `User-specific memory updated successfully`, { userId, sessionId, messageCount: extendedMessages.length });
 
-            logDebug(methodName, `Memory updated successfully`, {
-                userId,
-                sessionId,
-                messageCount: extendedMessages.length,
-                source: context.source
-            });
+            // --- Additionally Update Group-Wide Memory if applicable ---
+            const chatType = context.raw?.chat?.type;
+            const isGroupChat = chatType === 'group' || chatType === 'supergroup';
+
+            if (isGroupChat) {
+                const groupSessionId = context.chatId.toString(); // Use chatId as the session key for groups
+                const senderUserId = context.userId.toString(); // Use the actual sender's ID
+
+                // --- Prepare messages specifically for group memory ---
+                // Create new BaseMessage instances with added metadata in additional_kwargs
+                const groupBaseMessagesWithSender = messages.map(baseMsg => {
+                    const newKwargs = {
+                        ...(baseMsg.additional_kwargs || {}), // Keep existing kwargs
+                        senderUserId: senderUserId,         // Add actual sender ID
+                        originalUserId: userId,             // Add original user context
+                        originalSessionId: sessionId        // Add original session context
+                    };
+                    // Create a new instance of the same type with updated kwargs
+                    if (baseMsg instanceof HumanMessage) {
+                        return new HumanMessage({ content: baseMsg.content, additional_kwargs: newKwargs });
+                    } else if (baseMsg instanceof AIMessage) {
+                        return new AIMessage({ content: baseMsg.content, additional_kwargs: newKwargs });
+                    } else { // Includes SystemMessage and potentially others
+                        return new SystemMessage({ content: baseMsg.content, additional_kwargs: newKwargs });
+                    }
+                });
+
+                // Convert these new BaseMessages to the ExtendedIMessage format
+                const groupExtendedMessagesWithSender: ExtendedIMessage[] = groupBaseMessagesWithSender
+                    .filter(msg => msg.content)
+                    .flatMap((message) => {
+                        const contentString = messageContentToString(message.content);
+                        const isHuman = message.getType() === 'human';
+                        const messageType: MessageType = isHuman ? 'userMessage' : 'apiMessage';
+
+                        // Split message if needed and create ExtendedIMessage objects
+                        return this.splitMessage(contentString, 1000).map((chunk): ExtendedIMessage => ({
+                            message: chunk, // Add the required 'message' property
+                            text: chunk,    // Keep 'text' for compatibility if needed elsewhere
+                            type: messageType,
+                            additional_kwargs: message.additional_kwargs // Pass through the updated kwargs
+                        }));
+                    });
+
+
+                if (this.memoryGroup) { // Add null check for memoryGroup
+                    try {
+                        // Use addChatMessagesExtended to ensure correct key generation with "GROUP" placeholder
+                    // Pass the correctly prepared groupExtendedMessagesWithSender
+                    // Call addChatMessages again, but with chatId as sessionId
+                    // The third argument (senderUserId) might be used differently by the memory implementation
+                    // depending on how it handles group vs individual sessions.
+                    // Use "GROUP" as userId placeholder for group-wide memory key generation
+                    // Use addChatMessagesExtended to ensure correct key generation with "GROUP" placeholder
+                    await this.memoryGroup.addChatMessagesExtended(groupExtendedMessagesWithSender, "GROUP", groupSessionId);
+                    logInfo(methodName, `Group-wide memory updated successfully`, { chatId: groupSessionId, messageCount: groupExtendedMessagesWithSender.length }); // Removed senderUserId from log as it's now in metadata
+                } catch (groupMemoryError) {
+                    logError(methodName, 'Error updating group-wide memory:', groupMemoryError as Error, {
+                        chatId: groupSessionId,
+                        senderUserId: senderUserId
+                        });
+                        // Do not throw; failure to update group memory shouldn't stop the flow
+                    }
+                } else {
+                    logWarn(methodName, 'memoryGroup is not initialized, cannot update group-wide memory.');
+                    // Do not throw; failure to update group memory shouldn't stop the flow
+                }
+            }
 
             return context.source === 'flowise' ? { sessionId } : undefined;
 
