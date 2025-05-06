@@ -17,6 +17,10 @@ import { open, Database } from 'sqlite';
 import path from 'path';
 import { logWarn, logInfo, logError } from '../loggingUtility';
 import { IStorage, SessionData, SessionInfo, UserStats, ExtendedIMessage, ConversationMessage, SavedConversation } from '../commands/types'
+// Define and export a type for the return value of getOrCreateSession
+export interface SessionWithUser extends SessionInfo { // Add export keyword
+    userAccount?: any; // Or a more specific type if UserAccount type exists
+}
 import { v4 as uuidv4 } from 'uuid';
 
 export {
@@ -556,6 +560,16 @@ export class DatabaseService {
                     user_id TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES user_accounts(id)
                 );
+
+                -- User document profiles table
+                CREATE TABLE IF NOT EXISTS user_document_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    profile_data TEXT NOT NULL, -- Store profile as JSON string
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES user_accounts(id) ON DELETE CASCADE
+                );
+
             `);
 
             // Create indices
@@ -748,12 +762,15 @@ export class DatabaseService {
      * @returns The session information, including the normalized user ID and session status.
      * @throws Error if the database is not initialized.
      */
+    // Use the new SessionWithUser interface for the return type
     public async getOrCreateSession(
         sessionInfo: SessionInfo,
         skipUserCreation: boolean = false
-    ): Promise<SessionInfo> {
+    ): Promise<SessionWithUser> { // Use the defined interface
         const methodName = 'getOrCreateSession';
         if (!this.botDb) throw new Error('Database not initialized');
+
+        let userAccount: any = null; // Declare userAccount *before* the main try block
 
         try {
             // For Flowise chat window, check source first
@@ -816,27 +833,73 @@ export class DatabaseService {
                         interface: sessionInfo.metadata?.interface || 'telegram'
                     };
 
-                    await this.createUser({
+                    const newUser: CreateUserDTO = { // Define the new user object and type it correctly
                         id: normalizedUserId,
-                        type: isFlowiseChat ? 'flowise' : 'telegram',
+                        type: (isFlowiseChat ? 'flowise' : 'telegram') as AuthType, // Cast type correctly
                         subscription_tier: SUBSCRIPTION_TIERS.FREE,
                         token_quota: this.DEFAULT_TOKEN_QUOTA,
-                        metadata
-                    });
+                        metadata,
+                        // Only include fields defined in CreateUserDTO
+                        password_hash: undefined,
+                        telegram_id: undefined,
+                        telegram_username: undefined,
+                        wallet_address: undefined,
+                        email: undefined
+                        // Removed fields handled by DB defaults (created_at, etc.)
+                    };
+                    await this.createUser(newUser);
+                    // Assign to the userAccount declared in the outer scope
+                    userAccount = newUser;
 
                     logInfo(methodName, 'Created new user:', {
                         userId: normalizedUserId,
                         type: isFlowiseChat ? 'flowise' : 'telegram'
                     });
+                } else {
+                    // If user exists, assign the fetched data to userAccount
+                    userAccount = existingUser;
+                    logInfo(methodName, 'Assigned existing user data to userAccount variable.');
                 }
 
-                // Check for existing session
-                let session = await this.botDb.get(
-                    'SELECT * FROM sessions WHERE id = ? AND status = ?',
-                    [sessionInfo.sessionId, 'active']
-                );
+                let session: any; // Declare session variable
 
+                // *** MODIFIED LOGIC FOR WEBAPP ***
+                if (sessionInfo.source === 'webapp') {
+                    // For webapp, prioritize finding an existing active session by normalizedUserId and interface
+                    logInfo(methodName, 'Webapp source detected. Looking for existing session by userId:', { normalizedUserId });
+                    session = await this.botDb.get(
+                        `SELECT * FROM sessions
+                         WHERE user_id = ?
+                         AND status = 'active'
+                         AND json_extract(metadata, '$.interface') = 'webapp'
+                         ORDER BY last_active DESC
+                         LIMIT 1`,
+                        [normalizedUserId]
+                    );
+
+                    if (session) {
+                        logInfo(methodName, 'Found existing active webapp session for user:', { sessionId: session.id, userId: normalizedUserId });
+                        // Optionally update last_active timestamp for the found session
+                        await this.botDb.run('UPDATE sessions SET last_active = CURRENT_TIMESTAMP WHERE id = ?', [session.id]);
+                    } else {
+                         logInfo(methodName, 'No existing active webapp session found for user. Will proceed to check by sessionId.', { normalizedUserId });
+                         // Fall through to check by sessionId below
+                    }
+                }
+                // *** END MODIFIED LOGIC ***
+
+                // If no session was found by userId (for webapp) or if source is not webapp, check by sessionId
                 if (!session) {
+                    logInfo(methodName, 'Checking for existing session by sessionId:', { sessionId: sessionInfo.sessionId });
+                    session = await this.botDb.get(
+                        'SELECT * FROM sessions WHERE id = ? AND status = ?',
+                        [sessionInfo.sessionId, 'active']
+                    );
+                }
+
+                // If still no session found, create a new one
+                if (!session) {
+                     logInfo(methodName, 'No active session found by sessionId, creating new session:', { sessionId: sessionInfo.sessionId });
                     // Sanitize metadata before storage
                     const sanitizedMetadata = this.sanitizeMetadata({
                         ...sessionInfo.metadata,
@@ -890,16 +953,19 @@ export class DatabaseService {
 
                 await this.botDb.run('COMMIT');
 
-                return {
-                    ...sessionInfo,
-                    source: dbSource,  // Use database-compatible source
+                // Construct the return object explicitly matching SessionWithUser
+                const result: SessionWithUser = {
+                    ...sessionInfo, // Spread original session info
+                    source: dbSource,
                     userId: normalizedUserId,
                     metadata: {
                         ...sessionInfo.metadata,
                         originalSource: sessionInfo.source,
                         interface: sessionInfo.source === 'webapp' ? 'webapp' : 'telegram'
-                    }
+                    },
+                    userAccount: userAccount // Explicitly assign userAccount
                 };
+                return result;
 
             } catch (error) {
                 await this.botDb.run('ROLLBACK');
@@ -1206,7 +1272,7 @@ export class DatabaseService {
                 messageId,
                 conversationId,
                 role,
-                rawContent,
+                rawContent, // Use raw content
                 msg.timestamp || timestamp, // Use original timestamp if exists
                 JSON.stringify(metadata)
             ]
@@ -1231,7 +1297,7 @@ export class DatabaseService {
                     length: rawContent.length,
                     preview: rawContent.substring(0, 50)
                 },
-                stored: {
+                stored: { // Log stored content
                     content: inserted.content,
                     length: inserted.content.length,
                     preview: inserted.content.substring(0, 50)
@@ -1505,45 +1571,48 @@ export class DatabaseService {
             // Use SQLite datetime functions for comparison
             const tokenRecord = await this.botDb.get(
                 `SELECT expires_at, used, created_at,
-                        datetime('now', 'localtime') as current_time,
-                        (strftime('%s', expires_at) - strftime('%s', 'now', 'localtime')) / 60 as minutes_remaining
-                 FROM temp_auth_tokens 
-                 WHERE user_id = ? 
+                        datetime('now') as current_utc_time
+                 FROM temp_auth_tokens
+                 WHERE user_id = ?
                  AND used = 0
-                 ORDER BY created_at DESC 
+                 AND expires_at > datetime('now') -- Add expiry check here
+                 ORDER BY created_at DESC
                  LIMIT 1`,
                 [userId]
             );
 
-            if (!tokenRecord) {
-                logInfo(methodName, 'Token validation result:', {
-                    userId,
-                    isValid: false,
-                    reason: 'No valid token found'
-                });
-                return false;
-            }
+            // The check below becomes simpler as the query already filtered expired tokens
+            const isValid = !!tokenRecord && !tokenRecord.used; // Check if a record was found and not used
 
-            const minutesRemaining = parseInt(tokenRecord.minutes_remaining);
-            const isValid = !tokenRecord.used && minutesRemaining > 0;
+            if (!tokenRecord) {
+                 logInfo(methodName, 'Token validation result:', {
+                     userId,
+                     isValid: false,
+                     reason: 'No valid, unexpired, unused token found in DB' // Updated reason
+                 });
+                 return false;
+             }
+
+            // Log remaining details if a valid token was found
+            const minutesRemaining = Math.round((new Date(tokenRecord.expires_at).getTime() - Date.now()) / 60000); // Calculate remaining minutes in JS
 
             // Format dates for display only
             const now = new Date();
             const currentAEST = now.toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
             const expiryAEST = new Date(tokenRecord.expires_at).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
 
-            logInfo(methodName, 'Token validation details:', {
+            logInfo(methodName, 'Token validation details (UTC comparison):', { // Updated log message
                 userId,
                 isValid,
-                currentAEST,
-                expiryAEST,
+                currentAEST, // Keep local time for logging context
+                expiryUTC: tokenRecord.expires_at, // Log the stored UTC expiry
                 minutesRemaining,
                 isUsed: tokenRecord.used === 1,
                 reason: isValid ? 'Valid token' :
                     tokenRecord.used ? 'Token used' :
                         'Token expired',
                 debug: {
-                    sqliteCurrentTime: tokenRecord.current_time,
+                    sqliteCurrentUTCTime: tokenRecord.current_utc_time, // Log UTC time from SQLite
                     rawExpiryAt: tokenRecord.expires_at,
                     rawCreatedAt: tokenRecord.created_at
                 }
@@ -1631,29 +1700,21 @@ export class DatabaseService {
         if (!this.botDb) throw new Error('Database not initialized');
 
         try {
-            // Store in SQLite datetime format: YYYY-MM-DD HH:MM:SS
-            const formattedExpiry = expiryTime.toLocaleString('en-AU', {
-                timeZone: 'Australia/Brisbane',
-                year: 'numeric',
-                month: '2-digit',
-                day: '2-digit',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: false
-            }).replace(/(\d+)\/(\d+)\/(\d+),\s*(\d+):(\d+):(\d+)/, '$3-$2-$1 $4:$5:$6');
+            // Store expiry time in ISO 8601 format (UTC)
+            const formattedExpiry = expiryTime.toISOString();
 
-            logInfo(methodName, 'Storing token with dates:', {
+            logInfo(methodName, 'Storing token with UTC expiry:', {
                 userId,
-                formattedExpiry,
-                originalExpiry: expiryTime.toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })
+                utcExpiry: formattedExpiry,
+                originalDateObj: expiryTime.toString() // Log original Date object for reference
             });
 
+            // Store the ISO 8601 UTC string
             await this.botDb.run(
                 `INSERT INTO temp_auth_tokens (
                     token, user_id, expires_at, used
                 ) VALUES (?, ?, ?, 0)`,
-                [token, userId, formattedExpiry]
+                [token, userId, formattedExpiry] // Store UTC string
             );
         } catch (error) {
             logError(methodName, 'Error storing token:', error as Error);
@@ -2001,9 +2062,9 @@ export class DatabaseService {
             // Calculate new expiry using SQLite datetime functions
             await this.botDb.run(
                 `UPDATE temp_auth_tokens 
-                 SET expires_at = datetime('now', 'localtime', '+30 minutes')
-                 WHERE user_id = ? 
-                 AND used = 0 
+                 SET expires_at = datetime('now', '+30 minutes') -- Use UTC for consistency
+                 WHERE user_id = ?
+                 AND used = 0
                  AND rowid = (
                     SELECT rowid FROM temp_auth_tokens 
                     WHERE user_id = ? 
@@ -2599,7 +2660,7 @@ export class DatabaseService {
             `msg_${uuidv4()}`,
             conversationId,
             msg.role || 'user',
-            msg.content || msg.message || '',
+            msg.content || msg.message || '', // Use raw content
             this.normalizeTimestamp(msg.timestamp)
         ]);
 
@@ -2718,4 +2779,52 @@ export class DatabaseService {
     }
     // Add methods for user management, chat history, etc.
 
-}
+
+    /**
+     * Saves or updates the user's document profile data.
+     * @param userId The normalized user ID.
+     * @param profileData The complete profile data object.
+     */
+    public async saveDocumentProfile(userId: string, profileData: object): Promise<void> {
+        const methodName = 'saveDocumentProfile';
+        if (!this.botDb) throw new Error('Bot database not initialized');
+
+        try {
+            const profileJson = JSON.stringify(profileData);
+            await this.botDb.run(
+                `INSERT INTO user_document_profiles (user_id, profile_data, created_at, updated_at)
+                 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                    profile_data = excluded.profile_data,
+                    updated_at = CURRENT_TIMESTAMP`,
+                [userId, profileJson]
+            );
+            logInfo(methodName, 'Document profile saved/updated successfully', { userId });
+        } catch (error) {
+            logError(methodName, 'Error saving document profile', error as Error, { userId });
+            throw error;
+        }
+    }
+
+    /**
+     * Retrieves the user's document profile data.
+     * @param userId The normalized user ID.
+     * @returns The profile data object, or null if not found.
+     */
+    public async getDocumentProfile(userId: string): Promise<object | null> {
+        const methodName = 'getDocumentProfile';
+        if (!this.botDb) throw new Error('Bot database not initialized');
+
+        try {
+            const row = await this.botDb.get('SELECT profile_data FROM user_document_profiles WHERE user_id = ?', [userId]);
+            if (row && row.profile_data) {
+                return JSON.parse(row.profile_data);
+            }
+            return null;
+        } catch (error) {
+            logError(methodName, 'Error retrieving document profile', error as Error, { userId });
+            // Return null or rethrow depending on desired error handling
+            return null;
+        }
+    }
+ }

@@ -4,29 +4,13 @@ import { DatabaseService } from './DatabaseService';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
-import { logInfo, logError } from '../loggingUtility';
+import { logInfo, logError, logWarn } from '../loggingUtility'; // Added logWarn
 import {
-  UserAccount,
-  UserStats,
-  TokenUsage,
-  AuthRequest,
-  TelegramAuthData,
-  WebAuthResponse,
   AuthTokens,
-  WebAuthData,
-  WalletAuthData
 } from '../commands/types';
 import {
   AUTH_TYPES,
-  SUBSCRIPTION_TIERS,
-  type AuthType,
-  type SubscriptionTier,
-  type CreateUserDTO,
-  SessionCreationDTO,
-  type UserData
 } from '../services/DatabaseService';
-import { Telegram } from 'telegraf';
-
 
 
 
@@ -79,6 +63,55 @@ export class AuthService {
       throw new Error('Invalid token');
     }
   }
+/**
+   * Validates if a given token is valid for a specific user ID.
+   * Checks against the database for existence, expiry, and revocation.
+   *
+   * @param userId - The normalized user ID (e.g., 'tg_12345').
+   * @param token - The token string to validate.
+   * @returns True if the token is valid for the user, false otherwise.
+   */
+  async validateToken(userId: string, token: string): Promise<boolean> {
+    const methodName = 'validateToken';
+    if (!userId || !token) {
+      logWarn(methodName, 'Missing userId or token for validation', { hasUserId: !!userId, hasToken: !!token });
+      return false;
+    }
+
+    try {
+      // 1. Verify JWT signature and basic structure (doesn't check DB yet)
+      const decoded = jwt.verify(token, this.JWT_SECRET) as { userId: string; type: string; exp?: number };
+
+      // 2. Check if the userId in the token matches the provided userId
+      if (decoded.userId !== userId) {
+        logWarn(methodName, 'Token userId mismatch', { tokenUserId: decoded.userId, providedUserId: userId });
+        return false;
+      }
+
+      // 3. Check against the database using the correct method for temp tokens
+      // We need to check if a valid, unused temp token exists for this specific user ID.
+      const isValidInDB = await this.databaseService.hasValidAuthToken(userId); // Use hasValidAuthToken with userId
+
+      if (!isValidInDB) {
+        logInfo(methodName, 'Token invalid according to database', { userId, tokenPreview: token.substring(0, 10) });
+        return false;
+      }
+
+      logInfo(methodName, 'Token validated successfully', { userId });
+      return true;
+
+    } catch (error) {
+      // Handle JWT verification errors (e.g., expired, invalid signature)
+      if (error instanceof jwt.TokenExpiredError) {
+        logInfo(methodName, 'Token validation failed: Expired', { userId });
+      } else if (error instanceof jwt.JsonWebTokenError) {
+        logWarn(methodName, 'Token validation failed: Invalid JWT', { userId, error: error.message });
+      } else {
+        logError(methodName, 'Unexpected error during token validation', error as Error, { userId });
+      }
+      return false;
+    }
+  }
 
   /**
    * Generates a new access token and refresh token for the specified user ID.
@@ -104,6 +137,17 @@ export class AuthService {
     await this.databaseService.storeAuthTokens(userId, accessToken, refreshToken);
     return { accessToken, refreshToken };
   }
+
+  /**
+   * Public method to generate persistent access and refresh tokens.
+   * This wraps the private generateTokens method.
+   * @param userId - The user ID to generate tokens for.
+   * @returns An object containing the new access token and refresh token.
+   */
+  public async generatePersistentTokens(userId: string): Promise<AuthTokens> {
+      return this.generateTokens(userId);
+  }
+
 
   /**
    * Generates a temporary authentication token for the specified user ID.

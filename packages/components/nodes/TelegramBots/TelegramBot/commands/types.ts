@@ -577,6 +577,7 @@ export interface ChatRequest {
 }
 export interface WebappChatIdData {
     sessionId: string;
+    authToken?: string; // Add optional auth token
     userId: string;
     firstName?: string;
     source: 'webapp';

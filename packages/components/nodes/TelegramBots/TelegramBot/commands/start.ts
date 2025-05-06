@@ -9,6 +9,8 @@ import { ContextAdapter } from '../ContextAdapter';
 import { logInfo, logError, logWarn } from '../loggingUtility';
 import { handlePlatformSpecificResponse } from '../utils/utils';
 import { sendConfirmationMessage } from '../utils/confirmationUtil';
+// Import types from their correct locations
+import { SessionInfo } from './types'; // Import SessionInfo from types.ts
 import {
     AUTH_TYPES,
     SUBSCRIPTION_TIERS,
@@ -16,7 +18,8 @@ import {
     type SubscriptionTier,
     type CreateUserDTO,
     SessionCreationDTO,
-    type UserData
+    type UserData,
+    type SessionWithUser // Import SessionWithUser from DatabaseService
 } from '../services/DatabaseService';
 export const startCommand: Command = {
     name: 'start',
@@ -25,8 +28,8 @@ export const startCommand: Command = {
         adapter: ContextAdapter,
         conversationManager: ConversationManager,
         memory: IExtendedMemory | null,
-        userId: string,
-        sessionId: string,
+        userId: string, // Original userId from adapter/context
+        sessionId: string, // Original sessionId from adapter/context
         promptManager: PromptManager | null,
         botInstance: TelegramBot_Agents
     ) => {
@@ -35,118 +38,45 @@ export const startCommand: Command = {
 
         try {
             logInfo(methodName, `Executing start command`, { userId, sessionId });
-            // Add database verification
-            console.log(`[${methodName}] Verifying database state before proceeding`);
 
-            // Check user table
-            const userRecord = await botInstance.databaseService.getUserById(userId);
-            console.log(`[${methodName}] User record check:`, {
-                userId,
-                exists: !!userRecord,
-                details: userRecord
-            });
+            // Step 1: Get session identifiers from ConversationManager
+            const initialSessionInfo: SessionInfo = await conversationManager.getSessionInfo(adapter);
+            const normalizedUserId = initialSessionInfo.userId;
+            const normalizedSessionId = initialSessionInfo.sessionId;
 
-            // Check session table
-            const sessionRecord = await botInstance.databaseService.getSession(sessionId);
-            console.log(`[${methodName}] Session record check:`, {
-                sessionId,
-                exists: !!sessionRecord,
-                details: sessionRecord
-            });
+            // Step 2: Call DatabaseService to get/create user and session, returning SessionWithUser
+            const sessionWithUser: SessionWithUser = await botInstance.databaseService.getOrCreateSession(initialSessionInfo);
+            const userAccount = sessionWithUser.userAccount; // Extract userAccount
 
-            // Initialize user account first
-            const userAccount = await botInstance.initializeTelegramUser(adapter);
-            const normalizedUserId = userAccount.id;
-
-            // Verify the session exists and is active
-            const sessionInfo = await conversationManager.getSessionInfo(adapter);
-            const normalizedSessionId = sessionInfo.sessionId;
-
-            // Verify normalized IDs
-            console.log(`[${methodName}] ID normalization check:`, {
-                originalUserId: userId,
-                normalizedUserId,
-                originalSessionId: sessionId,
-                normalizedSessionId,
-                sessionStatus: sessionInfo.status
-            });
-
-            // Verify database state after normalization
-            const verifyUserRecord = await botInstance.databaseService.getUserById(normalizedUserId);
-            const verifySessionRecord = await botInstance.databaseService.getSession(normalizedSessionId);
-
-            console.log(`[${methodName}] Database state after normalization:`, {
-                userExists: !!verifyUserRecord,
-                sessionExists: !!verifySessionRecord,
-                userDetails: verifyUserRecord,
-                sessionDetails: verifySessionRecord
-            });
-            // If either record is missing, recreate them
-            if (!verifyUserRecord || !verifySessionRecord) {
-                console.log(`[${methodName}] Missing records detected, attempting to recreate`);
-
-                if (!verifyUserRecord) {
-                    await botInstance.databaseService.createUser({
-                        id: normalizedUserId,
-                        type: 'telegram',
-                        subscription_tier: 'free',
-                        token_quota: botInstance.databaseService.DEFAULT_TOKEN_QUOTA,
-                        metadata: {
-                            original_id: userId,
-                            source: 'telegram',
-                            created_at: new Date().toISOString()
-                        }
-                    });
-                    console.log(`[${methodName}] Recreated user record`);
-                }
-
-                if (!verifySessionRecord) {
-                    const context = adapter.getMessageContext();
-                    const isWebapp = context.source === 'webapp';
-
-                    const newSession: SessionCreationDTO = {
-                        id: normalizedSessionId,
-                        userId: normalizedUserId,
-                        type: 'private',
-                        source: 'telegram',  // Always use telegram as source
-                        chatId: adapter.getMessageContext().chatId.toString(),
-                        created_at: new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }),
-                        last_active: new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }),
-                        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }),
-                        status: 'active',
-                        metadata: {
-                            original_request: adapter.getMessageContext(),
-                            flowId: botInstance.flowId,
-                            interface: isWebapp ? 'webapp' : 'telegram',  // Track interface type
-                            requiresAuth: isWebapp  // Track auth requirement
-                        },
-                        flowwiseChatflowId: botInstance.flowId
-                    };
-
-                    await botInstance.databaseService.createSession(newSession);
-                    console.log(`[${methodName}] Recreated session record with interface:`, {
-                        interface: isWebapp ? 'webapp' : 'telegram'
-                    });
-                }
-
-                // Verify again after recreation
-                const finalUserRecord = await botInstance.databaseService.getUserById(normalizedUserId);
-                const finalSessionRecord = await botInstance.databaseService.getSession(normalizedSessionId);
-
-                console.log(`[${methodName}] Final database state:`, {
-                    userExists: !!finalUserRecord,
-                    sessionExists: !!finalSessionRecord,
-                    userDetails: finalUserRecord,
-                    sessionDetails: finalSessionRecord
-                });
+            // Check if userAccount was successfully retrieved/created by DatabaseService
+            if (!userAccount) {
+                 logError(methodName, `User account could not be found or created after getOrCreateSession for ${normalizedUserId}`, { sessionInfo: initialSessionInfo });
+                 await adapter.reply("Sorry, there was an issue initializing your account. Please try again.");
+                 return;
             }
 
+            // Use the potentially updated session info from the database result if needed,
+            // otherwise continue using initialSessionInfo for logging consistency if preferred.
+            const finalSessionInfo = sessionWithUser; // Or stick with initialSessionInfo
+
+            logInfo(methodName, `User and session verified/created`, {
+                normalizedUserId,
+                normalizedSessionId,
+                sessionStatus: finalSessionInfo.status,
+                sessionSource: finalSessionInfo.source,
+                sessionInterface: finalSessionInfo.metadata?.interface,
+                userTokenQuota: userAccount.token_quota // Access token_quota from userAccount
+            });
             const context = adapter.getMessageContext();
+
+            // userTokenQuota is now derived directly from the extracted userAccount
+            const userTokenQuota = userAccount.token_quota ?? botInstance.DEFAULT_TOKEN_QUOTA;
+
             const isAuthFlow = context.input.toLowerCase().includes('auth');
 
             logInfo(methodName, `Executing start command`, {
-                userId,
-                sessionId,
+                userId, // Log original userId
+                sessionId, // Log original sessionId
                 interface: isAuthFlow ? 'telegram-auth' : 'telegram',
                 timestamp: new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })
             });
@@ -158,12 +88,12 @@ export const startCommand: Command = {
             if (isAuthFlow) {
                 welcomeMessage = `👋 Welcome ${context.raw?.from?.first_name || 'there'}!
 
-                I'm here to help you authenticate for the web application. Your account is ready with ${userAccount.token_quota} tokens available.
-                
+                I'm here to help you authenticate for the web application. Your account is ready with ${userTokenQuota} tokens available.
+
                 You can now return to the web application by clicking on "🌐 Open Web Chat" button below, and continue your conversation there.
-                
+
                 Need help? Just type /help to see available commands.`;
-                        } else {
+            } else {
                 // Get welcome message
                 let knowledgeBaseOverview: string;
                 try {
@@ -173,7 +103,8 @@ export const startCommand: Command = {
                     knowledgeBaseOverview = "I'm having trouble accessing my knowledge base at the moment.";
                 }
 
-                welcomeMessage = `👋 Welcome ${context.raw?.from?.first_name || 'there'}, to your AI assistant! I'm here to help you with various tasks and answer your questions. Your account is ready with ${userAccount.token_quota} tokens available.
+                // Use the fetched quota here
+                welcomeMessage = `👋 Welcome ${context.raw?.from?.first_name || 'there'}, to your AI assistant! I'm here to help you with various tasks and answer your questions. Your account is ready with ${userTokenQuota} tokens available.
 
 ${knowledgeBaseOverview}
 
@@ -200,7 +131,7 @@ How can I assist you today?`;
             }
 
             // Store in memory only if session is active
-            if (memory && sessionInfo.status === 'active') {
+            if (memory && finalSessionInfo.status === 'active') { // Use finalSessionInfo here
                 try {
                     await botInstance.databaseService.ensureChatMessagesTable();
                     // Store each chunk separately
@@ -239,8 +170,8 @@ How can I assist you today?`;
             }
             // Update logging
             logInfo(methodName, `Executing start command`, {
-                userId,
-                sessionId,
+                userId, // Log original userId
+                sessionId, // Log original sessionId
                 interface: isWebapp ? 'webapp' : 'telegram',
                 timestamp: new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })
             });

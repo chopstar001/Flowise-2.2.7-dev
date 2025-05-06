@@ -57,6 +57,8 @@ import {
 import { AuthService } from './services/AuthService';
 import { GameAgent } from './agents/GameAgent';
 import { PatternPromptAgent } from './agents/PatternPromptAgent';
+import { DocumentProcessingAgent } from './agents/DocumentProcessingAgent'; // <-- Import Agent
+import { documentProcessingAgentPlugin } from './plugins/DocumentProcessingAgentPlugin'; // <-- Import Plugin
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { TranscriptionSettings, TranscriptionSettingsUtil } from './commands/transcriptionsettings';
@@ -64,12 +66,74 @@ import * as path from 'path';
 import * as fs from 'fs';
 import axios from 'axios';
 import { TranscriptionService } from './services/TranscriptionService';
+import crypto from 'crypto'; // Added for initData validation
 
 
 const botInstanceCache = new NodeCache({ stdTTL: 0, checkperiod: 600, useClones: false });
 const botInitializationLocks: { [key: string]: Mutex } = {};
 const flowIdMap = new Map<string, string>(); // Maps botKey to flowId
 const execAsync = promisify(exec);
+
+// --- START: Telegram InitData Validation Utility ---
+/**
+ * Validates the hash of Telegram Web App initData.
+ * @param botToken - The Telegram bot token.
+ * @param initData - The initData string from the web app.
+ * @returns An object containing { isValid: boolean, user?: any }
+ */
+const validateTelegramInitData = (botToken: string, initData: string): { isValid: boolean; user?: any } => {
+    const methodName = 'validateTelegramInitData';
+    if (!botToken || !initData) {
+        logError(methodName, 'Missing botToken or initData', new Error('Missing required parameters'));
+        return { isValid: false };
+    }
+
+    try {
+        const urlParams = new URLSearchParams(initData);
+        const hash = urlParams.get('hash');
+        if (!hash) {
+            logWarn(methodName, 'No hash found in initData');
+            return { isValid: false };
+        }
+
+        const dataToCheck: string[] = [];
+        const sortedKeys = Array.from(urlParams.keys()).sort();
+
+        sortedKeys.forEach((key) => {
+            if (key !== 'hash') {
+                const value = urlParams.get(key);
+                if (value !== null) {
+                    dataToCheck.push(`${key}=${value}`);
+                }
+            }
+        });
+
+        const dataCheckString = dataToCheck.join('\n');
+        const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+        const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+        const isValid = calculatedHash === hash;
+
+        let user = null;
+        if (isValid && urlParams.has('user')) {
+            const userJson = urlParams.get('user');
+            if (userJson) {
+                try {
+                    user = JSON.parse(userJson);
+                } catch (parseError) {
+                    logError(methodName, 'Error parsing user data from initData', parseError as Error);
+                }
+            }
+        }
+
+        logInfo(methodName, `Validation result: ${isValid}`, { calculatedHash, receivedHash: hash, userFound: !!user });
+        return { isValid, user };
+
+    } catch (error) {
+        logError(methodName, 'Error validating initData', error as Error);
+        return { isValid: false };
+    }
+};
+// --- END: Telegram InitData Validation Utility ---
 
 
 function getOrCreateFlowId(botKey: string): string {
@@ -514,23 +578,52 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         console.log(`[Init entered:] Looking to Initialize`);
 
         try {
-            // Initialize database first
-            this.databaseService = new DatabaseService(this.flowId);
-            await this.databaseService.initialize();
+            // Initialize database and auth services ONLY if they don't exist
+            if (!this.databaseService) {
+                logInfo('init', 'DatabaseService not found, initializing...');
+                this.databaseService = new DatabaseService(this.flowId);
+                await this.databaseService.initialize();
+                // This method already creates all necessary tables in the correct order
+                await this.databaseService.createBotTables();
+                logInfo('init', 'DatabaseService initialized.');
+            } else {
+                logInfo('init', 'DatabaseService already exists, skipping initialization.');
+            }
 
-            // This method already creates all necessary tables in the correct order
-            await this.databaseService.createBotTables();
-            // Initialize AuthService after DatabaseService
-            this.authService = new AuthService(this.databaseService);
+            if (!this.authService) {
+                logInfo('init', 'AuthService not found, initializing...');
+                if (!this.databaseService) {
+                     throw new Error("DatabaseService must be initialized before AuthService");
+                }
+                this.authService = new AuthService(this.databaseService);
+                logInfo('init', 'AuthService initialized.');
+            } else {
+                 logInfo('init', 'AuthService already exists, skipping initialization.');
+            }
 
-            // Initialize other services that depend on database
-            this.accountManager = new AccountManager(
-                this.databaseService,
-                this.conversationManager!,
-                this.flowId,
-                nodeData.inputs?.defaultTokenQuota as number,
-                this.authService
-            );
+            // Initialize AccountManager (depends on DB and Auth services)
+            // Ensure it's also only initialized once or updated if needed
+            if (!this.accountManager) {
+                logInfo('init', 'AccountManager not found, initializing...');
+                if (!this.databaseService || !this.authService) {
+                    throw new Error("DatabaseService and AuthService must be initialized before AccountManager");
+                }
+                // Correct constructor call syntax and provide default quota
+                this.accountManager = new AccountManager(
+                    this.databaseService,
+                    this.conversationManager!, // Assuming conversationManager is initialized elsewhere or handled
+                    this.flowId,
+                    nodeData.inputs?.defaultTokenQuota as number ?? this.DEFAULT_TOKEN_QUOTA, // Use default if undefined
+                    this.authService
+                );
+                logInfo('init', 'AccountManager initialized.');
+            } else {
+                logInfo('init', 'AccountManager already exists, skipping initialization.');
+                // Optionally update AccountManager if needed, e.g., quota changes
+                // this.accountManager.updateSettings(...)
+            }
+
+            // Removed erroneous logInfo call
 
             logInfo('init', 'Services initialized successfully', {
                 hasDatabase: !!this.databaseService,
@@ -598,6 +691,66 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         return this.initializationPromise;
     }
 
+/**
+     * Initializes or re-initializes essential services (DB, Auth, AccountMgr) on the instance.
+     */
+    private async _reinitializeServices(nodeData: INodeData, options: ICommonObject): Promise<void> {
+        const methodName = '_reinitializeServices';
+        logInfo(methodName, 'Ensuring essential services are initialized...');
+
+        try {
+            // Initialize database service if needed
+            if (!this.databaseService) {
+                logInfo(methodName, 'DatabaseService missing, initializing...');
+                this.databaseService = new DatabaseService(this.flowId);
+                await this.databaseService.initialize();
+                await this.databaseService.createBotTables();
+                logInfo(methodName, 'DatabaseService initialized.');
+            } else {
+                 logInfo(methodName, 'DatabaseService already exists.');
+            }
+
+            // Initialize auth service if needed
+            if (!this.authService) {
+                logInfo(methodName, 'AuthService missing, initializing...');
+                 if (!this.databaseService) {
+                     throw new Error("DatabaseService must be initialized before AuthService");
+                 }
+                this.authService = new AuthService(this.databaseService);
+                logInfo(methodName, 'AuthService initialized.');
+            } else {
+                 logInfo(methodName, 'AuthService already exists.');
+            }
+
+            // Initialize account manager if needed
+            if (!this.accountManager) {
+                logInfo(methodName, 'AccountManager missing, initializing...');
+                 if (!this.databaseService || !this.authService) {
+                     throw new Error("DatabaseService and AuthService must be initialized before AccountManager");
+                 }
+                this.accountManager = new AccountManager(
+                    this.databaseService,
+                    this.conversationManager!, // Assumes conversationManager is handled elsewhere
+                    this.flowId,
+                    nodeData.inputs?.defaultTokenQuota as number ?? this.DEFAULT_TOKEN_QUOTA,
+                    this.authService
+                );
+                logInfo(methodName, 'AccountManager initialized.');
+            } else {
+                 logInfo(methodName, 'AccountManager already exists.');
+                 // Optionally update settings if needed
+                 // this.accountManager.updateSettings(...)
+            }
+
+            logInfo(methodName, 'Essential services check complete.');
+
+        } catch (error) {
+            logError(methodName, 'Error initializing services:', error as Error);
+            // Reset state partially? Or let the caller handle full reset?
+            // For now, just re-throw to indicate failure.
+            throw error;
+        }
+    }
 
 
     private async performInitialization(nodeData: INodeData, flowData: string, options: ICommonObject, interactionType?: InteractionType): Promise<void> {
@@ -886,6 +1039,26 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             this.agentManager.registerAgent('rag', this.ragAgent);
             this.agentManager.setConversationManager(this.conversationManager);
             this.conversationManager.setRAGAgent(this.ragAgent);  // Set RAGAgent after creation
+
+            // --- Load Document Processing Agent Plugin ---
+            this.agentManager.loadPlugin(documentProcessingAgentPlugin);
+            const docAgent = this.agentManager.getAgent('document_processor');
+            if (docAgent instanceof DocumentProcessingAgent) {
+                if (this.databaseService) {
+                    docAgent.setDatabaseService(this.databaseService);
+                    logInfo(methodName, 'Successfully injected DatabaseService into DocumentProcessingAgent.');
+                } else {
+                    logError(methodName, 'DatabaseService not initialized, cannot inject into DocumentProcessingAgent.', new Error('DatabaseService is null'));
+                    // Optionally remove the agent if DB service is critical
+                    // this.agentManager.unregisterAgent('document_processor');
+                }
+            } else if (docAgent) {
+                logWarn(methodName, 'Agent with type "document_processor" exists but is not an instance of DocumentProcessingAgent.');
+            } else {
+                logWarn(methodName, 'DocumentProcessingAgent not found after loading plugin.');
+            }
+            // --- End Plugin Loading ---
+
 
             // Set memory in ConversationManager
             this.conversationManager.setMemory(this.memory);
@@ -3201,7 +3374,22 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                     }
                 }, 5000);
             }
-        } else {
+        }
+        // --- START: Add Document Processing Agent Callback Handling ---
+        else if (data.startsWith('docproc_')) {
+            const docAgent = this.agentManager?.getAgent('document_processor') as DocumentProcessingAgent | undefined;
+            if (docAgent && typeof docAgent.handleDocProcCallback === 'function') {
+                logInfo(methodName, `Delegating callback to DocumentProcessingAgent`, { data });
+                // We don't need to return anything here as the agent handles the response
+                await docAgent.handleDocProcCallback(adapter, data); // Pass the full data string
+            } else {
+                logWarn(methodName, `DocumentProcessingAgent not found or handleDocProcCallback method missing`, { agentExists: !!docAgent });
+                await adapter.answerCallbackQuery('Document processing feature is currently unavailable.');
+            }
+            return; // Callback handled (or error sent)
+        }
+        // --- END: Add Document Processing Agent Callback Handling ---
+        else {
             console.warn('Received unknown callback query:', data);
             await adapter.answerCallbackQuery("I don't know how to handle this action.");
         }
@@ -3394,44 +3582,44 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             // Log any text message in a group to the group memory, including from other bots if desired
             // For now, let's log messages from humans and this bot's instance if needed later
             if (!isFromOtherBot || message.from?.id === this.botId) { // Log human messages and own messages
-                 try {
+                try {
                     const groupSessionId = context.chatId.toString();
                     const senderUserId = context.userId.toString(); // Actual sender
                     const messageTimestamp = message.date ? new Date(message.date * 1000).toISOString() : new Date().toISOString(); // Handle potentially undefined date
 
                     // Create a BaseMessage (specifically HumanMessage for user inputs)
                     const groupBaseMessage = new HumanMessage({
-                         content: originalText,
-                         additional_kwargs: {
-                             message_id: message.message_id,
-                             senderUserId: senderUserId,
-                             timestamp: messageTimestamp,
-                             // Add sender's first name if available
-                             senderFirstName: message.from?.first_name
-                         }
-                     });
+                        content: originalText,
+                        additional_kwargs: {
+                            message_id: message.message_id,
+                            senderUserId: senderUserId,
+                            timestamp: messageTimestamp,
+                            // Add sender's first name if available
+                            senderFirstName: message.from?.first_name
+                        }
+                    });
 
                     // Convert to the format expected by addChatMessages
                     // Ensure this format matches what addChatMessages expects
                     const groupExtendedMessage = [{
-                         text: originalText,
-                         type: 'userMessage' as MessageType, // Log as user message
-                         additional_kwargs: groupBaseMessage.additional_kwargs
+                        text: originalText,
+                        type: 'userMessage' as MessageType, // Log as user message
+                        additional_kwargs: groupBaseMessage.additional_kwargs
                     }];
 
 
                     await this.memoryGroup.addChatMessages(groupExtendedMessage, groupSessionId, senderUserId);
                     logInfo(methodName, `Logged message to group memory`, { chatId: groupSessionId, senderUserId: senderUserId });
-                 } catch (groupLogError) {
+                } catch (groupLogError) {
                     logError(methodName, 'Failed to log message to group memory', groupLogError as Error, { chatId: context.chatId });
-                 }
+                }
             }
         }
         // --- END: Log ALL Group Text Messages ---
 
         // Now, proceed with the original logic for ignoring other bots if needed for *processing*
         if (isFromOtherBot) {
-             return "Not our bot. Ignore processing."; // Return after potentially logging
+            return "Not our bot. Ignore processing."; // Return after potentially logging
         }
 
         console.log("Received message:", JSON.stringify(message, null, 2));
@@ -3456,8 +3644,8 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         let text: string = originalText || context.input;
         let isCaption = false;
         if (!originalText && 'caption' in message && message.caption) {
-             text = message.caption;
-             isCaption = true;
+            text = message.caption;
+            isCaption = true;
         }
 
         // Handle question selection
@@ -5647,18 +5835,18 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                 if (this.memoryGroup) { // Add null check for memoryGroup
                     try {
                         // Use addChatMessagesExtended to ensure correct key generation with "GROUP" placeholder
-                    // Pass the correctly prepared groupExtendedMessagesWithSender
-                    // Call addChatMessages again, but with chatId as sessionId
-                    // The third argument (senderUserId) might be used differently by the memory implementation
-                    // depending on how it handles group vs individual sessions.
-                    // Use "GROUP" as userId placeholder for group-wide memory key generation
-                    // Use addChatMessagesExtended to ensure correct key generation with "GROUP" placeholder
-                    await this.memoryGroup.addChatMessagesExtended(groupExtendedMessagesWithSender, "GROUP", groupSessionId);
-                    logInfo(methodName, `Group-wide memory updated successfully`, { chatId: groupSessionId, messageCount: groupExtendedMessagesWithSender.length }); // Removed senderUserId from log as it's now in metadata
-                } catch (groupMemoryError) {
-                    logError(methodName, 'Error updating group-wide memory:', groupMemoryError as Error, {
-                        chatId: groupSessionId,
-                        senderUserId: senderUserId
+                        // Pass the correctly prepared groupExtendedMessagesWithSender
+                        // Call addChatMessages again, but with chatId as sessionId
+                        // The third argument (senderUserId) might be used differently by the memory implementation
+                        // depending on how it handles group vs individual sessions.
+                        // Use "GROUP" as userId placeholder for group-wide memory key generation
+                        // Use addChatMessagesExtended to ensure correct key generation with "GROUP" placeholder
+                        await this.memoryGroup.addChatMessagesExtended(groupExtendedMessagesWithSender, "GROUP", groupSessionId);
+                        logInfo(methodName, `Group-wide memory updated successfully`, { chatId: groupSessionId, messageCount: groupExtendedMessagesWithSender.length }); // Removed senderUserId from log as it's now in metadata
+                    } catch (groupMemoryError) {
+                        logError(methodName, 'Error updating group-wide memory:', groupMemoryError as Error, {
+                            chatId: groupSessionId,
+                            senderUserId: senderUserId
                         });
                         // Do not throw; failure to update group memory shouldn't stop the flow
                     }
@@ -5783,21 +5971,50 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
 
 
 
+    // Update the WebappChatIdData interface (assuming it's here or in types.ts)
+    // interface WebappChatIdData {
+    //     source: 'webapp';
+    //     userId: string;
+    //     firstName: string;
+    //     sessionId: string;
+    //     authToken?: string; // Make optional initially for backward compatibility if needed
+    // }
+
     private parseWebappChatId(chatId: string): WebappChatIdData | null {
+        const methodName = 'parseWebappChatId';
         try {
-            // Expected format: webapp|userId|firstName|sessionId
-            // e.g., "webapp|1414981328|Marcus|424ac03a-8b26-4d23-bc9c-60571ce39a6b"
+            // Expected format: webapp|userId|firstName|sessionId|authToken
+            // e.g., "webapp|1414981328|Marcus|66f57296-b5fa-4f39-afd2-c25580950169|someAuthToken..."
             const parts = chatId.split('|');
-            if (parts[0] === 'webapp' && parts.length >= 4) {
-                return {
+            logInfo(methodName, `Parsing chatId: "${chatId}"`, { partsCount: parts.length });
+
+            // Check for the new format with 5 parts
+            if (parts[0] === 'webapp' && parts.length >= 5) {
+                const data: WebappChatIdData = {
                     source: 'webapp',
                     userId: parts[1],
                     firstName: parts[2],
-                    sessionId: parts[3]
+                    sessionId: parts[3],
+                    authToken: parts[4] // Extract the auth token
                 };
+                 logInfo(methodName, 'Successfully parsed webapp chatId with auth token', { data });
+                return data;
             }
+            // Fallback for the old format (4 parts) if needed during transition
+            else if (parts[0] === 'webapp' && parts.length === 4) {
+                 logWarn(methodName, 'Parsed webapp chatId using old format (missing auth token)', { chatId });
+                 return {
+                     source: 'webapp',
+                     userId: parts[1],
+                     firstName: parts[2],
+                     sessionId: parts[3],
+                     authToken: undefined // No token in old format
+                 };
+            }
+            logWarn(methodName, 'ChatId does not match expected webapp format', { chatId });
             return null;
-        } catch {
+        } catch (error) {
+             logError(methodName, 'Error parsing webapp chatId', error as Error, { chatId });
             return null;
         }
     }
@@ -5808,8 +6025,87 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         options: ICommonObject
     ): Promise<string | ICommonObject> {
         const methodName = 'run';
+        // *** CAPTURE ORIGINAL INPUT OBJECT ***
+        const originalInputObject = (typeof input === 'object' && input !== null) ? { ...input } : null;
+        logInfo(methodName, 'Captured originalInputObject:', { hasObject: !!originalInputObject });
 
         try {
+            // *** NEW DETAILED LOGGING START ***
+            logInfo(methodName, '--- START: Full Input/Options Dump ---');
+            try {
+                // *** ADDED: Log options specifically for command string input ***
+                if (typeof input === 'string' && input.startsWith('COMMAND:')) {
+                    // Use a safe stringify function to handle potential circular references
+                    const safeStringify = (obj: any) => {
+                        const cache = new Set();
+                        return JSON.stringify(obj, (key, value) => {
+                            // Remove potentially sensitive or large objects that cause issues
+                            if (key === 'logger' || key === 'appDataSource' || key === 'databaseEntities' || key === 'analytic' || key === 'uploads' || key === 'req' || typeof value === 'function') {
+                                return `[Removed: ${key}]`;
+                            }
+                            if (typeof value === 'object' && value !== null) {
+                                if (cache.has(value)) {
+                                    return '[Circular]';
+                                }
+                                cache.add(value);
+                            }
+                            return value;
+                        }, 2); // Indent for readability
+                    };
+                    logInfo(methodName, '>>> Options object when input is COMMAND string:', { optionsDump: safeStringify(options) });
+                }
+                // Use safeSerialize helper if available, otherwise basic JSON.stringify
+                const safeStringify = (obj: any) => {
+                    const cache = new Set();
+                    return JSON.stringify(obj, (key, value) => {
+                        if (typeof value === 'object' && value !== null) {
+                            if (cache.has(value)) {
+                                // Circular reference found, discard key
+                                return '[Circular]';
+                            }
+                            // Store value in our collection
+                            cache.add(value);
+                        }
+                        // Remove potentially sensitive or large objects
+                        if (key === 'logger' || key === 'appDataSource' || key === 'databaseEntities' || key === 'analytic' || key === 'uploads' || key === 'req') {
+                            return `[Removed: ${key}]`;
+                        }
+                        return value;
+                    }, 2); // Indent for readability
+                };
+                logInfo(methodName, 'Full Input Object:', { inputDump: safeStringify(input) });
+                logInfo(methodName, 'Full Options Object:', { optionsDump: safeStringify(options) });
+            } catch (dumpError) {
+                logError(methodName, 'Error during full input/options dump', dumpError as Error);
+                // Log basic types if stringify fails
+                logInfo(methodName, 'Basic Input Type:', { type: typeof input });
+                logInfo(methodName, 'Basic Options Keys:', { keys: Object.keys(options) });
+            }
+            logInfo(methodName, '--- END: Full Input/Options Dump ---');
+            // *** NEW DETAILED LOGGING END ***
+
+            // --- START: DETAILED OPTIONS LOGGING ---
+            logInfo(methodName, '--- START: Inspecting options object ---');
+            logInfo(methodName, `Options keys: ${Object.keys(options).join(', ')}`);
+            if (options.req) {
+                logInfo(methodName, `options.req exists. Keys: ${Object.keys(options.req).join(', ')}`);
+                if (options.req.headers) {
+                    logInfo(methodName, `options.req.headers: ${JSON.stringify(options.req.headers)}`);
+                } else {
+                    logInfo(methodName, 'options.req.headers does NOT exist.');
+                }
+            } else {
+                logInfo(methodName, 'options.req does NOT exist.');
+            }
+            if (options.requestHeaders) {
+                 logInfo(methodName, `options.requestHeaders: ${JSON.stringify(options.requestHeaders)}`);
+            } else {
+                 logInfo(methodName, 'options.requestHeaders does NOT exist.');
+            }
+             logInfo(methodName, '--- END: Inspecting options object ---');
+            // --- END: DETAILED OPTIONS LOGGING ---
+
+
             // Detailed input logging
             logInfo(methodName, 'Raw input received:', {
                 inputType: typeof input,
@@ -5898,6 +6194,13 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
 
                             const normalizedUserId = `tg_${webappData.userId}`;
 
+                            // *** MODIFIED: Include authToken and authUserId from original payload if available ***
+                            // We need to access the original payload. Assuming 'input' might be the original object if not a string,
+                            // or we might need to check 'options' if the original object structure isn't preserved.
+                            // Let's assume 'input' holds the original object structure if it wasn't a string initially.
+                            // A more robust solution might involve passing the original payload explicitly.
+                            const originalPayload = (typeof options?.input === 'object' && options.input !== null) ? options.input : {};
+
                             // Create SafeOptions with command data and user info
                             parsedInput = {
                                 question: input,  // Keep original encoded command
@@ -5914,10 +6217,19 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                                     type: AUTH_TYPES.TELEGRAM,
                                     id: normalizedUserId,
                                     username: webappData.firstName
-                                }
+                                },
+                                // *** CORRECTED: Use data parsed from chatId (webappData) ***
+                                authToken: webappData.authToken, // Use token from parsed webappData
+                                authUserId: normalizedUserId      // Use the normalized user ID derived from webappData
                             };
+                            logInfo(methodName, 'Included authToken/authUserId in parsedInput for webapp command (from webappData)', {
+                                authTokenSource: webappData.authToken ? 'webappData' : 'missing',
+                                authUserIdSource: normalizedUserId ? 'webappData' : 'missing',
+                                hasAuthToken: !!parsedInput.authToken,
+                                hasAuthUserId: !!parsedInput.authUserId
+                            });
                         } else {
-                            // Fallback if no webapp data
+                            // Fallback if no webapp data (e.g., Flowise source)
                             parsedInput = {
                                 question: input,
                                 sessionId: options.sessionId || `session_${options.chatflowid || 'default'}`,
@@ -5929,6 +6241,7 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                                 command: commandData.command,
                                 commandParams: commandData.params,
                                 auth: options.auth
+                                // Note: authToken/authUserId might be missing here for non-webapp sources
                             };
                         }
                     } else if (input.trim().startsWith('{')) {
@@ -5945,17 +6258,53 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                             parsedInput = this.createDefaultSafeOptions(input, safeOptions);
                         }
                     } else {
-                        parsedInput = this.createDefaultSafeOptions(input, safeOptions);
+                        // *** MODIFIED START: Check options if input string is empty ***
+                        if (input.trim() === '' && options && 'command' in options && options.command) {
+                            logInfo(methodName, 'Empty string input, reconstructing from options command data');
+                            parsedInput = {
+                                question: '', // Keep question empty
+                                command: options.command,
+                                commandParams: options.commandParams,
+                                sessionId: options.sessionId || `session_${options.chatflowid || 'default'}`,
+                                userId: options.userId || '',
+                                chatId: options.chatId || `chat_${options.chatflowid || 'default'}`,
+                                source: options.source || 'webapp',
+                                chatType: options.chatType || 'private',
+                                messageId: Date.now(),
+                                auth: options.auth
+                            };
+                        } else {
+                            // If input string is not empty or options lack command, create default
+                            parsedInput = this.createDefaultSafeOptions(input, safeOptions);
+                        }
+                        // *** MODIFIED END ***
                     }
                 } catch (err) {
                     logInfo(methodName, 'Input parsing failed:', {
                         error: err instanceof Error ? err.message : 'Unknown error',
                         input: input.length > 100 ? `${input.substring(0, 100)}...` : input
                     });
-                    parsedInput = this.createDefaultSafeOptions(input, safeOptions);
+                    // Fallback to default on error
+                    parsedInput = this.createDefaultSafeOptions(typeof input === 'string' ? input : '', safeOptions);
                 }
-            } else {
+            } else if (typeof input === 'object' && input !== null) { // Explicitly check for object type here
+                // *** ADDED LOGGING START ***
+                logInfo(methodName, 'Received object input. Logging keys and content:', {
+                    inputKeys: Object.keys(input),
+                    inputContent: JSON.stringify(input, (key, value) => { // Add replacer to handle potential circular refs
+                        if (key === 'logger' || key === 'appDataSource') return '[Removed]';
+                        return value;
+                    }, 2) // Pretty print for readability
+                });
+                // *** ADDED LOGGING END ***
+
+                // Log the entire input object for debugging webapp requests (Keep existing log too)
+                logInfo(methodName, 'Received object input (potential webapp request):', { inputObject: JSON.stringify(input, null, 2) });
                 parsedInput = { ...input };
+            } else {
+                 // Handle unexpected input types defensively
+                 logWarn(methodName, 'Unexpected input type encountered:', { inputType: typeof input });
+                 parsedInput = this.createDefaultSafeOptions('', safeOptions); // Create default for safety
             }
 
 
@@ -5967,6 +6316,76 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                 command: parsedInput.command,
                 hasParams: !!parsedInput.commandParams
             });
+
+            // --- START: Subsequent Web App Request Token Validation (from Payload) ---
+            // Only validate token if it's a webapp source AND not the initial auth request
+            if (parsedInput.source === 'webapp' && !parsedInput.telegramInitData) {
+                 // *** ADDED: Ensure authService exists before validation ***
+                 if (!this.authService) {
+                     logWarn(methodName, 'AuthService is missing before token validation. Attempting re-initialization...');
+                     try {
+                         await this._reinitializeServices(nodeData, options);
+                         logInfo(methodName, 'Re-initialization of services completed.');
+                         if (!this.authService) {
+                             throw new Error('AuthService still missing after re-initialization attempt.');
+                         }
+                     } catch (reinitError) {
+                         logError(methodName, 'Failed to re-initialize services during run', reinitError as Error);
+                         // Return an error response as we cannot proceed without authService
+                         return { text: '🔒 Internal Server Error', error: 'Authentication service unavailable', requireAuth: true, showAuthModal: true };
+                     }
+                 }
+                 // *** END ADDED ***
+
+                 // *** ADDED LOGGING: Check authService status ***
+                 logInfo(methodName, 'Checking authService before token validation:', {
+                     authServiceExists: !!this.authService,
+                     authServiceType: typeof this.authService,
+                     hasValidateTokenMethod: typeof this.authService?.validateToken === 'function'
+                 });
+
+                 // Get token and user ID from the PAYLOAD now
+                 const tokenFromPayload = parsedInput.authToken as string | undefined;
+                 const userIdFromPayload = parsedInput.authUserId as string | undefined; // This should match parsedInput.userId if set correctly
+
+                 logInfo(methodName, 'Processing subsequent webapp request, checking token from PAYLOAD', { userId: userIdFromPayload, hasToken: !!tokenFromPayload });
+
+                 if (!tokenFromPayload || !userIdFromPayload) {
+                     logWarn(methodName, 'Missing authToken or authUserId in request payload for subsequent webapp request.');
+                     // Return auth required error immediately if token/userId missing in payload
+                     const userStats = userIdFromPayload ? await this.databaseService.getStatsForUser(userIdFromPayload) : null;
+                     const userRecord = userIdFromPayload ? await this.databaseService.getUserById(userIdFromPayload) : null;
+                     const tokenStats = userRecord && userStats ? { /* ... construct tokenStats ... */ } : null; // Construct as before if needed
+                     return {
+                         text: '🔒 Authentication Required', error: 'Missing authentication token or user ID', requireAuth: true, showAuthModal: true,
+                         metadata: { type: 'auth_error', timestamp: new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }), tokenStats }
+                     } as FormattedResponse;
+                 }
+
+                 // Validate the token from the payload
+                 const isTokenValid = await this.authService.validateToken(userIdFromPayload, tokenFromPayload);
+                 if (!isTokenValid) {
+                     logWarn(methodName, 'Invalid authToken provided in webapp request payload', { userId: userIdFromPayload });
+                      // Return auth required error if token invalid
+                     const userStats = await this.databaseService.getStatsForUser(userIdFromPayload);
+                     const userRecord = await this.databaseService.getUserById(userIdFromPayload);
+                     const tokenStats = userRecord && userStats ? { /* ... construct tokenStats ... */ } : null; // Construct as before if needed
+                     return {
+                         text: '🔒 Authentication Required', error: 'Invalid or expired token', requireAuth: true, showAuthModal: true,
+                         metadata: { type: 'auth_error', timestamp: new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }), tokenStats }
+                     } as FormattedResponse;
+                 }
+
+                 logInfo(methodName, 'Webapp token from payload validated successfully', { userId: userIdFromPayload });
+
+                 // Ensure the main userId used for processing matches the validated ID
+                 if (parsedInput.userId !== userIdFromPayload) {
+                    logWarn(methodName, 'Mismatch between input userId and validated payload authUserId', { inputUserId: parsedInput.userId, payloadUserId: userIdFromPayload });
+                    parsedInput.userId = userIdFromPayload; // Trust the validated payload ID
+                 }
+            }
+            // --- END: Subsequent Web App Request Token Validation ---
+
 
             // Early command detection and handling
             if ('command' in parsedInput && parsedInput.command?.startsWith('conversation_')) {
@@ -6094,22 +6513,36 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
 
             // Try to parse webapp data from chatId
             const webappData = options.chatId ? this.parseWebappChatId(options.chatId) : null;
+            let webappAuthToken: string | undefined; // Variable to store the token from chatId
+
             if (webappData) {
                 logInfo(methodName, 'Found webapp data in chatId', {
                     userId: webappData.userId,
                     firstName: webappData.firstName,
-                    sessionId: webappData.sessionId
+                    sessionId: webappData.sessionId,
+                    hasAuthToken: !!webappData.authToken // Log if token was parsed
                 });
+                webappAuthToken = webappData.authToken; // Store the token
 
                 const normalizedUserId = `tg_${webappData.userId}`;
                 const userRecord = await this.databaseService.getUserById(normalizedUserId);
-                const hasValidToken = await this.databaseService.hasValidAuthToken(normalizedUserId);
+
+                // --- Token Validation (Using token from chatId) ---
+                let isTokenValid = false;
+                if (webappAuthToken && this.authService) {
+                     isTokenValid = await this.authService.validateToken(normalizedUserId, webappAuthToken);
+                     logInfo(methodName, 'Webapp token validation result (from chatId):', { userId: normalizedUserId, tokenProvided: !!webappAuthToken, isValid: isTokenValid });
+                } else {
+                     // Log warning if token is missing in chatId or authService is unavailable
+                     logWarn(methodName, 'Webapp token from chatId or authService missing for validation', { userId: normalizedUserId, hasToken: !!webappAuthToken, hasAuthService: !!this.authService });
+                }
+                // --- End Token Validation ---
                 const userStats = await this.databaseService.getStatsForUser(normalizedUserId);
 
-                if (!hasValidToken) {
+                if (!isTokenValid) { // Check the validation result
                     const tokenStats = userRecord && userStats ? {
-                        quota: userRecord.token_quota,
-                        used: userStats.token_usage || 0,
+                        quota: userRecord?.token_quota || 0, // Add null checks
+                        used: userStats?.token_usage || 0,
                         remaining: userStats.available_tokens || 0,
                         total: userStats.total_tokens || 0,
                         messages: userStats.total_messages || 0,
@@ -6214,19 +6647,56 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         let bot = botInstanceCache.get<TelegramBot_Agents>(botKey);
 
         if (!bot) {
+            // --- Create New Instance ---
             logInfo(methodName, `Creating new bot instance`, { botKey, flowId });
             bot = new TelegramBot_Agents(flowId);
             try {
+                // Full initialization for a new instance
                 await bot.init(nodeData, '', options);
                 botInstanceCache.set(botKey, bot);
                 logInfo(methodName, `Bot instance created and cached`, { botKey });
             } catch (error) {
-                logError(methodName, `Error initializing bot`, error as Error);
-                botInstanceCache.del(botKey);
-                throw error;
+                logError(methodName, `Error initializing new bot`, error as Error);
+                botInstanceCache.del(botKey); // Remove potentially broken instance from cache
+                throw error; // Re-throw to signal failure
             }
         } else {
-            logInfo(methodName, `Retrieved existing bot instance`, { botKey });
+            // --- Use Cached Instance ---
+            logInfo(methodName, `Retrieved existing bot instance from cache`, { botKey });
+
+            // Check if essential services are missing on the cached instance
+            if (!bot.databaseService || !bot.authService || !bot.accountManager) {
+                logWarn(methodName, `Cached instance is missing essential services. Re-initializing services...`, {
+                    botKey,
+                    hasDB: !!bot.databaseService,
+                    hasAuth: !!bot.authService,
+                    hasAccountMgr: !!bot.accountManager
+                });
+                try {
+                    // Re-initialize only the services on the existing instance
+                    await bot._reinitializeServices(nodeData, options);
+                    // Explicitly set flags after successful service re-initialization
+                    bot.isInitialized = true;
+                    bot.isRunning = true; // Assuming if services are re-init, bot should be considered running
+                    logInfo(methodName, `Successfully re-initialized services on cached instance`, { botKey });
+                } catch (serviceError) {
+                    logError(methodName, `Error re-initializing services on cached bot`, serviceError as Error);
+                    // If service re-init fails, remove from cache and force full re-init next time
+                    botInstanceCache.del(botKey);
+                    throw new Error(`Failed to re-initialize services on cached bot instance: ${(serviceError as Error).message}`);
+                }
+            } else {
+                 logInfo(methodName, `Cached instance has all essential services.`);
+                 // Ensure flags are correctly set even if services existed
+                 bot.isInitialized = true;
+                 bot.isRunning = true;
+            }
+
+            // Ensure the flowId is up-to-date on the cached instance
+            if (bot.flowId !== flowId) {
+                 logWarn(methodName, `Updating flowId on cached instance`, { oldFlowId: bot.flowId, newFlowId: flowId });
+                 bot.flowId = flowId;
+            }
         }
 
         return bot;
@@ -6366,10 +6836,94 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         options: ICommonObject
     ): Promise<string | ICommonObject> {
         const methodName = 'executeRun';
-        console.log(`[executeRun] Entering executeRun`);
+        logInfo(methodName, `Entering executeRun`, { source: input.source, userId: input.userId });
+
         try {
             const chatflowid = options.chatflowid;
-            // Check for encoded command in question field first
+
+            // --- START: Web App Authentication Handling ---
+            if (input.telegramInitData) {
+                logInfo(methodName, 'Detected telegramInitData, attempting web app authentication.');
+                const botToken = this.getBotToken(); // Assuming this method exists and returns the token
+
+                if (!botToken) {
+                    logError(methodName, 'Bot token is missing, cannot validate initData', new Error('Bot token unavailable'));
+                    return { error: 'Bot configuration error', requireAuth: true };
+                }
+
+                // Use the top-level validateTelegramInitData function
+                const { isValid, user: telegramUser } = validateTelegramInitData(botToken, input.telegramInitData);
+
+                if (isValid && telegramUser) {
+                    try {
+                        // Ensure services are available (might be redundant if ensureInitialization is called later, but safer here)
+                        if (!this.databaseService || !this.authService) {
+                             throw new Error('Database or Auth service not initialized for web app auth');
+                        }
+
+                        const normalizedUserId = await this.databaseService.normalizeUserId(telegramUser.id.toString(), AUTH_TYPES.TELEGRAM);
+                        logInfo(methodName, 'initData valid, processing user', { telegramId: telegramUser.id, normalizedUserId });
+
+                        // Ensure user exists in DB
+                        const userAccount = await this.databaseService.getOrCreateUser({
+                            id: normalizedUserId,
+                            type: AUTH_TYPES.TELEGRAM,
+                            telegram_id: telegramUser.id,
+                            telegram_username: telegramUser.username || telegramUser.first_name,
+                            subscription_tier: 'free',
+                            token_quota: this.databaseService.DEFAULT_TOKEN_QUOTA,
+                            metadata: { source: 'telegram-webapp-auth', initDataUser: telegramUser }
+                        });
+
+                        // Generate persistent tokens using the public method
+                        const tokens = await this.authService.generatePersistentTokens(normalizedUserId);
+                        logInfo(methodName, 'Tokens generated successfully', { userId: normalizedUserId });
+
+                        // Return special auth success response
+                        return {
+                            isAuthSuccess: true,
+                            user: userAccount, // Return full user data
+                            token: tokens.accessToken,
+                            refreshToken: tokens.refreshToken,
+                            // Include other necessary fields for the frontend
+                            chatId: input.chatId,
+                            sessionId: input.sessionId,
+                            source: 'webapp-auth-success' // Indicate source
+                        };
+                    } catch (authError) {
+                        logError(methodName, 'Error during web app user processing/token generation', authError as Error);
+                        return { error: 'Authentication processing failed', requireAuth: true };
+                    }
+                } else {
+                    logWarn(methodName, 'Invalid telegramInitData received.');
+                    return { error: 'Invalid Telegram InitData', requireAuth: true };
+                }
+            }
+            // --- END: Web App Initial Authentication ---
+
+            // --- START: Subsequent Web App Request Token Validation ---
+            let tokenFromHeader: string | undefined;
+            let userIdFromHeader: string | undefined;
+
+            // Try getting headers from options.req first (more standard)
+            if (options.req?.headers) {
+                tokenFromHeader = options.req.headers['x-auth-token'] as string || options.req.headers['X-Auth-Token'] as string;
+                userIdFromHeader = options.req.headers['x-user-id'] as string || options.req.headers['X-User-Id'] as string;
+                logInfo(methodName, 'Checked options.req.headers', { hasToken: !!tokenFromHeader, hasUserId: !!userIdFromHeader });
+            }
+
+            // Fallback to options.requestHeaders if not found in options.req
+            if (!tokenFromHeader && options.requestHeaders) {
+                 tokenFromHeader = options.requestHeaders['x-auth-token'] || options.requestHeaders['X-Auth-Token'];
+                 logInfo(methodName, 'Checked options.requestHeaders (fallback)', { hasToken: !!tokenFromHeader });
+            }
+             if (!userIdFromHeader && options.requestHeaders) {
+                 userIdFromHeader = options.requestHeaders['x-user-id'] || options.requestHeaders['X-User-Id'];
+                 logInfo(methodName, 'Checked options.requestHeaders for userId (fallback)', { hasUserId: !!userIdFromHeader });
+            }
+
+
+            // --- START: Existing Command Handling ---
             const commandData = typeof input.question === 'string' ?
                 this.decodeCommand(input.question) : null;
 
@@ -6703,93 +7257,51 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             const aiResponse = await this.handleMessage(adapter, this.conversationManager!, this.agentManager);
 
             // Handle different response types based on source
-            if (context.source === 'webapp') {
-                try {
-                    const normalizedUserId = inputData.userId; // Already normalized above
-
-                    // Get user stats once
-                    const userStats = await this.accountManager.getUserStats(normalizedUserId);
-                    const responseText = this.ensureStringResponse(aiResponse);
-
-                    // Base metadata
-                    const metadata: any = {
-                        source: 'webapp',
-                        timestamp: new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })
-                    };
-
-                    // Add token stats if available
-                    if (userStats) {
-                        const QUOTA = 25000; // Set consistent quota
-                        metadata.tokenStats = {
-                            quota: QUOTA,
-                            used: userStats.token_usage || 0,
-                            remaining: Math.max(0, QUOTA - (userStats.token_usage || 0)),
-                            messages: userStats.total_messages || 0,
-                            lastReset: new Date(userStats.last_reset || Date.now()).toISOString(),
-                            nextReset: userStats.next_reset_date ?
-                                new Date(userStats.next_reset_date).toISOString() :
-                                null,
-                            subscription: userStats.subscription_tier
-                        };
-
-                        logInfo(methodName, 'Token stats prepared:', {
-                            subscription: userStats.subscription_tier,
-                            quota: metadata.tokenStats.quota,
-                            used: metadata.tokenStats.used,
-                            remaining: metadata.tokenStats.remaining
-                        });
-                    }
-
-
-                    // Regular message response
-                    return {
-                        text: responseText,
-                        content: responseText,
-                        metadata,
-                        question: (input as SafeOptions).question,
-                        chatId: options.chatId,
-                        chatMessageId: options.messageId || Date.now().toString(),
-                        isStreamValid: false,
-                        sessionId: options.chatId,
-                        memoryType: this.memory
-                    } as FormattedResponse;
-
-                } catch (error) {
-                    logError(methodName, 'Error in webapp response:', error as Error);
-                    return {
-                        text: this.ensureStringResponse(aiResponse),
-                        content: this.ensureStringResponse(aiResponse),
-                        metadata: {
-                            source: 'webapp',
-                            timestamp: new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })
-                        },
-                        error: 'Error processing request',
-                        question: (input as SafeOptions).question,
-                        chatId: options.chatId,
-                        chatMessageId: options.messageId || Date.now().toString(),
-                        isStreamValid: false,
-                        sessionId: options.chatId,
-                        memoryType: this.memory
-                    } as FormattedResponse;
+            // Handle different response types based on source
+            if (context.source === 'webapp' || context.source === 'flowise') {
+                // If handleMessage already returned a FormattedResponse, use it directly
+                if (typeof aiResponse !== 'string') { // Check if aiResponse is the FormattedResponse object
+                     logInfo(methodName, `Returning pre-formatted response for source: ${context.source}`);
+                     // Ensure token stats are added if available (might be redundant if already added, but safe)
+                     // *** Use the normalized userId from inputData for the final stats check ***
+                     const userStats = await this.accountManager.getUserStats(inputData.userId); // Use normalized ID
+                     if (userStats && aiResponse.metadata) {
+                         // Ensure metadata.tokenStats exists and initialize with defaults if not
+                         if (!aiResponse.metadata.tokenStats) {
+                             aiResponse.metadata.tokenStats = {
+                                 quota: 0,
+                                 used: 0,
+                                 remaining: 0,
+                                 messages: 0,
+                                 lastReset: new Date(0).toISOString(), // Use epoch as default
+                                 nextReset: null,
+                                 subscription: 'unknown'
+                             };
+                         }
+                         const QUOTA = userStats.token_quota || 25000; // Use actual quota if available
+                         aiResponse.metadata.tokenStats = {
+                             quota: QUOTA,
+                             used: userStats.token_usage || 0,
+                             remaining: Math.max(0, QUOTA - (userStats.token_usage || 0)),
+                             messages: userStats.total_messages || 0,
+                             lastReset: new Date(userStats.last_reset || Date.now()).toISOString(),
+                             nextReset: userStats.next_reset_date ? new Date(userStats.next_reset_date).toISOString() : null,
+                             subscription: userStats.subscription_tier // Assuming subscription_tier is on userStats or userRecord
+                         };
+                     }
+                     return aiResponse; // Return the FormattedResponse directly
+                } else {
+                    // If handleMessage returned a string (unexpected for webapp/flowise now, but handle defensively)
+                    logWarn(methodName, `handleMessage returned string for ${context.source}, formatting now.`);
+                    // *** FIXED: Use the normalized userId from inputData ***
+                    const userStats = await this.accountManager.getUserStats(inputData.userId); // Use normalized ID
+                    // Handle null case for userStats before passing to formatResponse
+                    return this.formatResponse(aiResponse, context, { userStats: userStats || undefined });
                 }
-            } else if (context.source === 'flowise') {
-                return {
-                    text: aiResponse,
-                    content: aiResponse,
-                    metadata: {
-                        source: 'flowise',
-                        timestamp: new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })
-                    },
-                    question: context.input,
-                    chatId: context.chatId,
-                    chatMessageId: context.messageId || Date.now().toString(),
-                    isStreamValid: false,
-                    sessionId: context.chatId,
-                    memoryType: this.memory
-                } as FormattedResponse;
             }
 
-            return this.formatResponse(aiResponse, context);
+            // For Telegram source, formatResponse returns a string
+            return this.formatResponse(aiResponse, context); // formatResponse handles string conversion for Telegram
         } catch (error) {
             logError(methodName, 'Error in executeRun:', error as Error);
             throw error;
@@ -6802,12 +7314,17 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             isInitialized: this.isInitialized,
             isRunning: this.isRunning,
             initializing: this.initializing,
-            hasDatabase: !!this.databaseService
+            hasDatabase: !!this.databaseService,
+            hasAuth: !!this.authService,
+            hasAccountMgr: !!this.accountManager
         });
 
-        // If already running and initialized with services
-        if (this.isInitialized && this.isRunning && this.databaseService) {
-            logInfo(methodName, 'Bot is already initialized and running');
+        // *** MODIFIED CHECK ***
+        // Consider initialized if flag is true AND essential services exist
+        const alreadyInitialized = this.isInitialized && this.isRunning && this.databaseService && this.authService && this.accountManager;
+
+        if (alreadyInitialized) {
+            logInfo(methodName, 'Bot is already initialized and running with essential services.');
             return;
         }
 
@@ -6816,38 +7333,48 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             logInfo(methodName, 'Initialization in progress. Waiting for completion...');
             await this.waitForInitialization();
             logInfo(methodName, 'Initialization wait completed');
-            return;
+            // Re-check after waiting, as state might have changed
+             if (this.isInitialized && this.isRunning && this.databaseService && this.authService && this.accountManager) {
+                 logInfo(methodName, 'Initialization completed during wait.');
+                 return;
+             } else {
+                 logWarn(methodName, 'Initialization did not complete successfully after waiting.');
+                 // Proceed to re-initialize if still needed
+             }
         }
 
-        // Initialize if not initialized, not running, or missing services
-        if (!this.isInitialized || !this.isRunning || !this.databaseService) {
+        // *** MODIFIED CONDITION ***
+        // Initialize if not considered already initialized
+        if (!alreadyInitialized) {
             logInfo(methodName, 'Starting initialization...', {
-                reason: !this.isInitialized ? 'Not initialized' :
-                    !this.isRunning ? 'Not running' :
-                        'Missing services'
+                reason: !this.isInitialized ? 'Flag false' :
+                        !this.isRunning ? 'Not running' :
+                        !this.databaseService ? 'Missing DB' :
+                        !this.authService ? 'Missing Auth' :
+                        !this.accountManager ? 'Missing AccountMgr' :
+                        'Unknown'
             });
-
             try {
                 this.initializing = true;
-
-                await this.init(nodeData, '', options);
-                this.isInitialized = true;
+                await this.init(nodeData, '', options); // init now checks internally before creating services
+                this.isInitialized = true; // Set flag after successful init
                 this.isRunning = true;
-
                 // Verify services after initialization
-                if (!this.databaseService) {
-                    throw new Error('Database service not initialized');
+                if (!this.databaseService || !this.authService || !this.accountManager) {
+                     throw new Error('Essential services failed to initialize');
                 }
-
                 logInfo(methodName, 'Initialization completed successfully');
             } catch (error) {
                 logError(methodName, 'Initialization failed:', error as Error);
-                throw error;
+                // Explicitly reset flags on error
+                this.isInitialized = false;
+                this.isRunning = false;
+                throw error; // Rethrow the error after resetting flags
             } finally {
                 this.initializing = false;
             }
         } else {
-            logInfo(methodName, 'Already in valid state, no action needed');
+             logInfo(methodName, 'Already in valid state, no action needed');
         }
 
         logInfo(methodName, 'Initialization check finished', {
@@ -7189,10 +7716,51 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                 }
 
                 case 'conversation_save': {
+                    let titleToSave = params.title?.trim();
+                    const messagesToSave = params.messages; // Assuming messages are already parsed array here
+
+                    // --- START: Title Generation Logic ---
+                    if (!titleToSave && messagesToSave && messagesToSave.length > 0) {
+                        logInfo(methodName, 'Title is empty, attempting generation...', { userId });
+                        try {
+                            // Prepare context for title generation (e.g., first user message + first bot response)
+                            const firstUserMsg = messagesToSave.find((msg: ConversationMessage) => msg.role === 'user');
+                            const firstBotMsg = messagesToSave.find((msg: ConversationMessage) => msg.role === 'assistant' || msg.role === 'bot'); // Allow 'bot' role too
+                            let contextForTitle = '';
+                            if (firstUserMsg) contextForTitle += `User: ${firstUserMsg.content.substring(0, 200)}\n`;
+                            if (firstBotMsg) contextForTitle += `Assistant: ${firstBotMsg.content.substring(0, 200)}`;
+
+                            if (contextForTitle && this.utilityModel) {
+                                const titlePrompt = `Generate a very short, concise title (max 5 words) for the following conversation snippet:\n\n${contextForTitle}\n\nTitle:`;
+                                const titleResponse = await this.utilityModel.invoke(titlePrompt);
+                                const generatedTitle = messageContentToString(titleResponse.content).replace(/["']/g, '').trim(); // Clean up quotes
+
+                                if (generatedTitle) {
+                                    titleToSave = generatedTitle.substring(0, 100); // Limit title length
+                                    logInfo(methodName, 'Generated title:', { userId, title: titleToSave });
+                                } else {
+                                    logWarn(methodName, 'LLM returned empty title, using default.', { userId });
+                                    titleToSave = `Chat from ${new Date().toLocaleString()}`;
+                                }
+                            } else {
+                                logWarn(methodName, 'Could not generate title context or utilityModel unavailable, using default.', { userId, hasContext: !!contextForTitle, hasModel: !!this.utilityModel });
+                                titleToSave = `Chat from ${new Date().toLocaleString()}`;
+                            }
+                        } catch (genError) {
+                            logError(methodName, 'Error generating title:', genError as Error, { userId });
+                            titleToSave = `Chat from ${new Date().toLocaleString()}`; // Fallback on error
+                        }
+                    } else if (!titleToSave) {
+                        // Handle case where title is empty AND there are no messages (shouldn't happen often)
+                        logWarn(methodName, 'Title empty and no messages found, using default title.', { userId });
+                        titleToSave = `Chat from ${new Date().toLocaleString()}`;
+                    }
+                    // --- END: Title Generation Logic ---
+
                     const conversationId = await this.databaseService.saveConversation(
                         userId,
-                        params.title,
-                        params.messages,
+                        titleToSave, // Use the potentially generated title
+                        messagesToSave,
                         {
                             description: params.description,
                             tags: params.tags,
@@ -7369,36 +7937,34 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
         } catch (error) {
             // Enhanced error handling
             const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+            const errorCode = error.name === 'RateLimitError' ? 'RATE_LIMIT_EXCEEDED' :
+                              error.name === 'ValidationError' ? 'INVALID_PARAMETERS' :
+                              'INTERNAL_ERROR';
+            const userFriendlyMessage = errorCode === 'RATE_LIMIT_EXCEEDED' ? 'Rate limit exceeded for this action.' :
+                                        errorCode === 'INVALID_PARAMETERS' ? 'Invalid parameters provided for the command.' :
+                                        'An internal error occurred while processing the command.';
+
             const errorDetails = {
-                code: error.name === 'RateLimitError' ? 'RATE_LIMIT_EXCEEDED' :
-                    error.name === 'ValidationError' ? 'INVALID_PARAMETERS' :
-                        'INTERNAL_ERROR',
+                code: errorCode,
+                message: errorMessage, // Technical message
+                userMessage: userFriendlyMessage, // User-friendly message
                 operation: command,
                 timestamp: new Date().toISOString(),
                 userId,
                 flowId: this.flowId
             };
 
-            // Enhanced error response with proper serialization
+            // Refined error response structure
             const errorResponse: Partial<FormattedResponse> = {
-                error: JSON.stringify({
-                    name: error instanceof Error ? error.name : 'Error',
-                    message: errorMessage,
-                    details: errorDetails,
-                    stack: error instanceof Error ? error.stack : undefined
-                }, null, 2),
+                error: errorMessage, // Simple error message for the main field
                 metadata: {
                     errorDetails: {
-                        command,
-                        params: this.safeSerialize(params),
-                        stackTrace: error instanceof Error ? error.stack : undefined,
-                        timestamp: new Date().toISOString(),
-                        flowId: this.flowId,
-                        userId,
-                        operation: command
+                        ...errorDetails, // Include all details here
+                        params: this.safeSerialize(params), // Add serialized params for debugging
+                        // stackTrace: error instanceof Error ? error.stack : undefined // Optionally include stack trace here if needed for frontend debugging
                     },
                     method: 'handleConversationCommand',
-                    message: 'Command processing failed'
+                    message: 'Command processing failed' // General status message
                 }
             };
 
@@ -7444,9 +8010,7 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
                 break;
 
             case 'conversation_save':
-                if (!params.title?.trim()) {
-                    throw new Error('Title is required for saving conversation');
-                }
+                // Removed title validation - Backend generates title if empty
                 if (!Array.isArray(params.messages) || params.messages.length === 0) {
                     throw new Error('Messages array is required and must not be empty');
                 }
@@ -8555,14 +9119,14 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
             return;
         }
         if (!this.fileManager) {
-             logError(methodName, 'FileManager is not initialized', new Error('FileManager is null'));
-             // Check if it's a callback to answer appropriately
-             if (adapter.context.callbackQuery) {
-                 await adapter.answerCallbackQuery('⚠️ Error: File processing system is not ready.');
-             }
-             await adapter.reply('⚠️ Error: File processing system is not ready.');
-             return;
-         }
+            logError(methodName, 'FileManager is not initialized', new Error('FileManager is null'));
+            // Check if it's a callback to answer appropriately
+            if (adapter.context.callbackQuery) {
+                await adapter.answerCallbackQuery('⚠️ Error: File processing system is not ready.');
+            }
+            await adapter.reply('⚠️ Error: File processing system is not ready.');
+            return;
+        }
 
         // --- Main Processing ---
         try {
@@ -8672,8 +9236,8 @@ export class TelegramBot_Agents implements INode, IUpdateMemory {
 
             // Clean up the cache entry as processing failed
             if (this.conversationManager) { // Ensure manager exists before accessing cache
-                 this.conversationManager.cache.del(cacheKey);
-                 logInfo(methodName, `Cache key ${cacheKey} deleted due to error in final catch block.`);
+                this.conversationManager.cache.del(cacheKey);
+                logInfo(methodName, `Cache key ${cacheKey} deleted due to error in final catch block.`);
             }
         }
     }

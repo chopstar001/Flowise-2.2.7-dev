@@ -698,15 +698,16 @@ export class CommandHandler {
             const [action, parameter] = command.split(':');
             // Try to answer the callback query but don't let it stop execution
             await adapter.answerCallbackQuery(`Action Received: "${parameter}", processing....`);
-        } catch (callbackError) {
+        } catch (callbackError: unknown) { // Add type annotation
             // If this fails (due to double-click or timeout), just log and continue
-            if (callbackError.response?.description?.includes('query is too old') ||
-                callbackError.response?.description?.includes('query ID is invalid')) {
-                console.log(`[${methodName}] Callback already answered or expired:`, callbackError.response.description);
+            // Type check before accessing properties
+            const description = (callbackError as any)?.response?.description;
+            if (typeof description === 'string' && (description.includes('query is too old') || description.includes('query ID is invalid'))) {
+                console.log(`[${methodName}] Callback already answered or expired:`, description);
                 // Continue execution - don't return
             } else {
                 // For other unexpected callback errors, log but continue
-                console.warn(`[${methodName}] Unexpected callback error:`, callbackError);
+                console.warn(`[${methodName}] Unexpected callback error:`, callbackError instanceof Error ? callbackError.message : String(callbackError));
             }
         }
         const { userId, sessionId } = await this.conversationManager!.getSessionInfo(adapter);
@@ -811,13 +812,16 @@ export class CommandHandler {
                     await adapter.replyWithAutoDelete("Invalid game command. Please try again.", 30000);
                     break;
             }
-        } catch (error) {
-            console.error(`[${methodName}] Error:`, error);
-            const errorMessage = error.message === 'No active game' ?
-                "No active game found. Use /millionaire to start a new game." :
-                error.message === 'No active question' ?
-                    "No active question. Use /millionaire to start a new game." :
-                    "An error occurred during the game. Please try again.";
+        } catch (error: unknown) { // Add type annotation
+            console.error(`[${methodName}] Error:`, error instanceof Error ? error.message : String(error));
+            let errorMessage = "An error occurred during the game. Please try again.";
+            if (error instanceof Error) {
+                errorMessage = error.message === 'No active game' ?
+                    "No active game found. Use /millionaire to start a new game." :
+                    error.message === 'No active question' ?
+                        "No active question. Use /millionaire to start a new game." :
+                        error.message; // Use the actual error message if it's not one of the specific cases
+            }
 
             await adapter.replyWithAutoDelete(errorMessage, 30000);
         }
@@ -882,18 +886,18 @@ export class CommandHandler {
     private async safeAnswerCallback(adapter: ContextAdapter, text: string): Promise<void> {
         try {
             await adapter.answerCallbackQuery(text);
-        } catch (error) {
+        } catch (error: unknown) { // Add type annotation
             // If the callback query is expired, try to send a regular message instead
-            if (error.response?.description?.includes('query is too old') ||
-                error.response?.description?.includes('query ID is invalid')) {
+            const description = (error as any)?.response?.description;
+            if (typeof description === 'string' && (description.includes('query is too old') || description.includes('query ID is invalid'))) {
                 try {
                     // Send a temporary message instead
                     await adapter.replyWithAutoDelete(text, 5000);
-                } catch (msgError) {
-                    console.warn('Failed to send fallback message:', msgError);
+                } catch (msgError: unknown) { // Add type annotation
+                    console.warn('Failed to send fallback message:', msgError instanceof Error ? msgError.message : String(msgError));
                 }
             } else {
-                console.warn('Failed to answer callback:', error);
+                console.warn('Failed to answer callback:', error instanceof Error ? error.message : String(error));
             }
         }
     }
@@ -2392,15 +2396,16 @@ export class CommandHandler {
                         // Answer the callback query to remove the loading indicator
                         await adapter.safeAnswerCallbackQuery('Menu refreshed');
                     }
-                } catch (error) {
+                } catch (error: unknown) { // Add type annotation
                     // Check if this is a "message is not modified" error
-                    if (error.response?.description?.includes('message is not modified')) {
+                    const description = (error as any)?.response?.description;
+                    if (typeof description === 'string' && description.includes('message is not modified')) {
                         console.log(`[${methodName}] Message already has this content and markup, no need to update`);
                         // Just acknowledge the callback to remove the loading indicator
                         await adapter.safeAnswerCallbackQuery('Menu unchanged');
                     } else {
                         // For other errors, log and send a new message
-                        console.warn(`[${methodName}] Error updating message, sending new one:`, error);
+                        console.warn(`[${methodName}] Error updating message, sending new one:`, error instanceof Error ? error.message : String(error));
                         await adapter.reply(message, {
                             parse_mode: 'HTML',
                             reply_markup: keyboard
@@ -2459,10 +2464,11 @@ export class CommandHandler {
                         reply_markup: keyboard
                     }
                 );
-            } catch (error) {
-                console.warn('Error updating message, sending new one:', error);
+            } catch (error: unknown) { // Add type annotation
+                console.warn('Error updating message, sending new one:', error instanceof Error ? error.message : String(error));
                 // If message is too long, send a new message without the content
-                if (error.response?.description?.includes('MESSAGE_TOO_LONG')) {
+                const description = (error as any)?.response?.description;
+                if (typeof description === 'string' && description.includes('MESSAGE_TOO_LONG')) {
                     await adapter.reply(
                         '📋 <b>Select a Pattern Category</b>\n\nChoose a category to see available processing patterns:',
                         {
@@ -2542,10 +2548,11 @@ export class CommandHandler {
                         reply_markup: keyboard
                     }
                 );
-            } catch (error) {
-                console.warn('Error updating message, sending new one:', error);
+            } catch (error: unknown) { // Add type annotation
+                console.warn('Error updating message, sending new one:', error instanceof Error ? error.message : String(error));
                 // If message is too long, send a new message without the content
-                if (error.response?.description?.includes('MESSAGE_TOO_LONG')) {
+                const description = (error as any)?.response?.description;
+                if (typeof description === 'string' && description.includes('MESSAGE_TOO_LONG')) {
                     await adapter.reply(
                         `📋 <b>${this.menuManager!.formatCategoryName(category)} Patterns</b>\n\n` +
                         `Page ${page + 1}/${totalPages}\n\n` +
@@ -3977,7 +3984,7 @@ export class CommandHandler {
                 );
             } else if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
                 await adapter.reply("📶 Unable to connect to Rumble's servers. Please check your internet connection and try again later.");
-            } else if (error.response?.status === 429 || (error.message && error.message.includes('429'))) {
+            } else if ((error as any)?.response?.status === 429 || (error instanceof Error && error.message.includes('429'))) {
                 // Rate limit error handling
                 await adapter.reply("⏳ Telegram rate limit reached. Please try again in a few moments.");
             } else {
@@ -4120,9 +4127,9 @@ export class CommandHandler {
                         // Pass either the structured content object or the fallback string to saveAndSendAsPDF
                         // Note: This will require updating saveAndSendAsPDF in FileManager to accept the object type.
                         await this.fileManager.saveAndSendAsPDF(adapter, pdfContent, title);
-                    } catch (error) {
+                    } catch (error: unknown) { // Add type annotation
                         // Fall back to regular content if formatting fails
-                        console.warn(`Failed to format content for PDF: ${error.message}`);
+                        console.warn(`Failed to format content for PDF: ${error instanceof Error ? error.message : String(error)}`);
                         await this.fileManager.saveAndSendAsPDF(adapter, content, title);
                     }
                 } else {
@@ -4131,8 +4138,8 @@ export class CommandHandler {
             } else {
                 await this.fileManager.saveAndSendAsText(adapter, content, title);
             }
-        } catch (error) {
-            console.error('Error handling pattern download:', error);
+        } catch (error: unknown) { // Add type annotation
+            console.error('Error handling pattern download:', error instanceof Error ? error.message : String(error));
             await adapter.safeAnswerCallbackQuery('Error creating file for download');
         }
     }
@@ -4263,8 +4270,8 @@ export class CommandHandler {
                     console.warn(`[${methodName}] Unknown standard menu action: ${action}`);
                     await adapter.safeAnswerCallbackQuery('This feature is not available yet.');
             }
-        } catch (error) {
-            console.error(`[${methodName}] Error handling standard menu action ${action}:`, error);
+        } catch (error: unknown) { // Add type annotation
+            console.error(`[${methodName}] Error handling standard menu action ${action}:`, error instanceof Error ? error.message : String(error));
             await this.safeAnswerCallback(adapter, 'An error occurred. Please try again.');
         }
     }
@@ -4524,10 +4531,10 @@ export class CommandHandler {
                         // Update the message
                         try {
                             await this.updateTranscriptionSettingsMessage(adapter, updatedSettings);
-                        } catch (editError) {
+                        } catch (editError: unknown) { // Add type annotation
                             // If edit fails due to "not modified", just ignore
-                            if (!editError.message?.includes('message is not modified')) {
-                                throw editError;
+                            if (!(editError instanceof Error && editError.message?.includes('message is not modified'))) {
+                                throw editError; // Rethrow if it's a different error
                             }
                         }
 
@@ -4773,12 +4780,16 @@ export class CommandHandler {
         try {
             // Ensure messageId is passed correctly
              const editOptions: ExtraEditMessageText = { parse_mode: 'Markdown' };
-             await adapter.editMessageText(statusMessage, typeof messageId === 'number' ? messageId : editOptions);
+             const finalEditOptions = { // Remove explicit type ExtraEditMessageText
+                 ...editOptions,
+                 message_id: typeof messageId === 'number' ? messageId : undefined
+             } as any; // Cast the object literal itself to any
+             await adapter.editMessageText(statusMessage, finalEditOptions); // No need to cast here anymore
 
-        } catch (e) {
-            console.warn(`[${methodName}] Error editing message initially:`, e);
-            // If editing fails, try sending a new status message
-            await adapter.reply(statusMessage);
+    } catch (e: unknown) { // Add type annotation
+        console.warn(`[${methodName}] Error editing message initially:`, e instanceof Error ? e.message : String(e));
+        // If editing fails, try sending a new status message
+        await adapter.reply(statusMessage);
         }
         await adapter.safeAnswerCallbackQuery('Processing...'); // Acknowledge the button press
 
@@ -4798,14 +4809,18 @@ export class CommandHandler {
                 }
                  // Ensure messageId is passed correctly and use HTML parse mode
                  const editOptions: ExtraEditMessageText = { parse_mode: 'HTML' };
-                 await adapter.editMessageText(statusMessage, typeof messageId === 'number' ? messageId : editOptions);
-            } catch (error) {
-                console.warn(`[${methodName}] Error updating status via editMessageText: ${error.message}`);
+                 const finalEditOptions = { // Remove explicit type ExtraEditMessageText
+                     ...editOptions,
+                     message_id: typeof messageId === 'number' ? messageId : undefined
+                 } as any; // Cast the object literal itself to any
+                 await adapter.editMessageText(statusMessage, finalEditOptions); // No need to cast here anymore
+            } catch (error: unknown) { // Add type annotation
+                console.warn(`[${methodName}] Error updating status via editMessageText: ${error instanceof Error ? error.message : String(error)}`);
                  // Fallback: send new message if edit fails (also sanitize)
                  try {
                     await adapter.reply(sanitizedStatus); // Send sanitized status
-                 } catch (replyError) {
-                    console.error(`[${methodName}] Failed to send status update as new message: ${replyError.message}`);
+                 } catch (replyError: unknown) { // Add type annotation
+                    console.error(`[${methodName}] Failed to send status update as new message: ${replyError instanceof Error ? replyError.message : String(replyError)}`);
                  }
             }
         };
@@ -4944,8 +4959,12 @@ export class CommandHandler {
             try {
                  // Ensure messageId is passed correctly
                  const editOptions: ExtraEditMessageText = { parse_mode: 'Markdown' };
-                 await adapter.editMessageText(finalErrorMessage, typeof messageId === 'number' ? messageId : editOptions);
-            } catch (e) {
+                 const finalEditOptions = { // Remove explicit type ExtraEditMessageText
+                     ...editOptions,
+                     message_id: typeof messageId === 'number' ? messageId : undefined
+                 } as any; // Cast the object literal itself to any
+                 await adapter.editMessageText(finalErrorMessage, finalEditOptions); // No need to cast here anymore
+            } catch (e: unknown) { // Add type annotation
                 await adapter.reply(finalErrorMessage); // Fallback reply
             }
             // Clean up cached args AND files even on error

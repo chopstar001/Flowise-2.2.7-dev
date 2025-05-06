@@ -45,6 +45,9 @@
 ## uploads
 **/uploads
 
+## Files Folder
+**/Reconveyence
+
 ## compressed
 **/*.tgz
 
